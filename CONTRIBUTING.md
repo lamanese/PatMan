@@ -8,7 +8,7 @@ If your change is useful for PatchMon in general, please contribute it to the up
 
 1. Branch from `feat/remote-reboot` (the deploy branch): `git checkout -b feat/short-description feat/remote-reboot`.
 2. Make the change with tests. Go code must pass `go build`, `gofmt`, `go vet`, `go test` and `golangci-lint`; the frontend must pass Biome and `npm run build`.
-3. Pushing a `feat/*` branch builds a test image `ghcr.io/lamanese/patchmon-server:feat-<name>` through GitHub Actions.
+3. Pushing a `feat/*` branch builds a test image `ghcr.io/lamanese/patman-server:feat-<name>` through GitHub Actions.
 4. Open a pull request against `feat/remote-reboot`.
 
 ## Rules of the fork

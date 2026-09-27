@@ -34,8 +34,8 @@ Security and operation
 The fork is built by GitHub Actions into a public image:
 
 ```
-ghcr.io/lamanese/patchmon-server:latest      # deploy branch feat/remote-reboot
-ghcr.io/lamanese/patchmon-server:feat-<name> # every feature branch
+ghcr.io/lamanese/patman-server:latest      # deploy branch feat/remote-reboot
+ghcr.io/lamanese/patman-server:feat-<name> # every feature branch
 ```
 
 `docker/docker-compose.fork.yml` is the production-style stack (PostgreSQL, Redis, guacd, server). `docker/server-fork.Dockerfile` builds the image from public base images only. Agent binaries for Linux (amd64/arm64/386/arm), FreeBSD and Windows are bundled in the server image and self-update from there.

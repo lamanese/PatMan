@@ -20,7 +20,7 @@ name: patchmon
 services:
 
   server:
-    image: ghcr.io/lamanese/patchmon-server:latest
+    image: ghcr.io/lamanese/patman-server:latest
     restart: unless-stopped
     env_file: .env
     ports:

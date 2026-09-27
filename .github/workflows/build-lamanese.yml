@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 env:
-  IMAGE: ghcr.io/lamanese/patchmon-server
+  IMAGE: ghcr.io/lamanese/patman-server
 
 jobs:
   build-agents:
