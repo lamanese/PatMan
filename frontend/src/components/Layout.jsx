@@ -297,7 +297,6 @@ const Layout = ({ children }) => {
 					name: "Patching",
 					href: "/patching",
 					icon: Wrench,
-					new: !patchingLocked,
 					lockedModule: patchingLocked ? "patching" : null,
 					lockedTier: patchingLocked ? getRequiredTier("patching") : null,
 					children: patchingChildren,
