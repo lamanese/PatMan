@@ -131,6 +131,52 @@ func (q *Queries) DeleteHostsByIDs(ctx context.Context, dollar_1 []string) error
 	return err
 }
 
+const forkGetHostByMachineID = `-- name: ForkGetHostByMachineID :one
+SELECT id, friendly_name FROM hosts WHERE machine_id = $1 ORDER BY created_at LIMIT 1
+`
+
+type ForkGetHostByMachineIDRow struct {
+	ID           string `json:"id"`
+	FriendlyName string `json:"friendly_name"`
+}
+
+// Fork: auto-enrollment refuses a second host for a machine that is already
+// enrolled (409 with the existing host) instead of creating a duplicate.
+func (q *Queries) ForkGetHostByMachineID(ctx context.Context, machineID *string) (ForkGetHostByMachineIDRow, error) {
+	row := q.db.QueryRow(ctx, forkGetHostByMachineID, machineID)
+	var i ForkGetHostByMachineIDRow
+	err := row.Scan(&i.ID, &i.FriendlyName)
+	return i, err
+}
+
+const forkListHostFriendlyNamesLike = `-- name: ForkListHostFriendlyNamesLike :many
+SELECT friendly_name FROM hosts
+WHERE lower(friendly_name) = lower($1)
+   OR lower(friendly_name) LIKE lower($1) || '-%'
+`
+
+// Fork: names that collide with a new host name: the name itself or the
+// name with a numeric suffix, case-insensitive. The caller picks the suffix.
+func (q *Queries) ForkListHostFriendlyNamesLike(ctx context.Context, name string) ([]string, error) {
+	rows, err := q.db.Query(ctx, forkListHostFriendlyNamesLike, name)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var friendly_name string
+		if err := rows.Scan(&friendly_name); err != nil {
+			return nil, err
+		}
+		items = append(items, friendly_name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const forkUpdateHostBootTime = `-- name: ForkUpdateHostBootTime :exec
 UPDATE hosts
 SET fork_boot_time = $1::timestamptz

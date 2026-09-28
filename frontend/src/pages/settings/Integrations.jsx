@@ -224,6 +224,13 @@ const Integrations = () => {
 
 	const server_url = serverUrlData?.server_url || window.location.origin;
 	const curl_flags = settings?.ignore_ssl_self_signed ? "-sk" : "-s";
+	// Windows enrollment: the script is fetched over HTTPS by PowerShell, so a
+	// self-signed server certificate needs the validation callback first.
+	const windowsEnrollmentCommand = `${
+		settings?.ignore_ssl_self_signed
+			? "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }; "
+			: ""
+	}irm "${getEnrollmentUrl("direct-host-windows")}" | iex`;
 
 	// biome-ignore lint/correctness/useExhaustiveDependencies: Only run on mount
 	useEffect(() => {
@@ -2327,7 +2334,7 @@ const Integrations = () => {
 										<div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
 											<input
 												type="text"
-												value={`curl ${curl_flags} "${getEnrollmentUrl("direct-host")}" | sh`}
+												value={`curl ${curl_flags} "${getEnrollmentUrl("direct-host")}" | sudo sh`}
 												readOnly
 												className="flex-1 px-3 py-2 border border-secondary-300 dark:border-secondary-600 rounded-md bg-secondary-50 dark:bg-secondary-900 text-secondary-900 dark:text-white font-mono text-xs break-all"
 											/>
@@ -2335,7 +2342,7 @@ const Integrations = () => {
 												type="button"
 												onClick={() =>
 													copy_to_clipboard(
-														`curl ${curl_flags} "${getEnrollmentUrl("direct-host")}" | sh`,
+														`curl ${curl_flags} "${getEnrollmentUrl("direct-host")}" | sudo sh`,
 														"direct-enrollment-command",
 													)
 												}
@@ -2358,8 +2365,55 @@ const Integrations = () => {
 										<p className="text-xs text-secondary-500 dark:text-white mt-3 p-2 bg-blue-50 dark:bg-blue-900/20 rounded border border-blue-200 dark:border-blue-800">
 											💡 <strong>Tip:</strong> Specify a custom name:{" "}
 											<code className="text-xs bg-secondary-200 dark:bg-secondary-700 px-1 py-0.5 rounded">
-												FRIENDLY_NAME="My Server" sh
+												FRIENDLY_NAME="My Server" sudo sh
 											</code>
+										</p>
+
+										<div className="block text-sm font-medium text-secondary-700 dark:text-white mt-5 mb-2">
+											Windows (PowerShell as Administrator)
+										</div>
+										<p className="text-xs text-secondary-600 dark:text-white mb-2">
+											Run this in an elevated PowerShell on the Windows host. It
+											enrolls the machine with this token and installs the
+											agent.
+										</p>
+										<div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+											<input
+												type="text"
+												value={windowsEnrollmentCommand}
+												readOnly
+												className="flex-1 px-3 py-2 border border-secondary-300 dark:border-secondary-600 rounded-md bg-secondary-50 dark:bg-secondary-900 text-secondary-900 dark:text-white font-mono text-xs break-all"
+											/>
+											<button
+												type="button"
+												onClick={() =>
+													copy_to_clipboard(
+														windowsEnrollmentCommand,
+														"direct-enrollment-command-windows",
+													)
+												}
+												className="btn-primary flex items-center justify-center gap-1 px-3 py-2 whitespace-nowrap"
+											>
+												{copy_success["direct-enrollment-command-windows"] ? (
+													<>
+														<CheckCircle className="h-4 w-4" />
+														Copied
+													</>
+												) : (
+													<>
+														<Copy className="h-4 w-4" />
+														Copy
+													</>
+												)}
+											</button>
+										</div>
+										<p className="text-xs text-secondary-500 dark:text-white mt-3 p-2 bg-blue-50 dark:bg-blue-900/20 rounded border border-blue-200 dark:border-blue-800">
+											💡 <strong>Tip:</strong> Custom name on Windows: run{" "}
+											<code className="text-xs bg-secondary-200 dark:bg-secondary-700 px-1 py-0.5 rounded">
+												$env:FRIENDLY_NAME = "My Server"
+											</code>{" "}
+											first. A name that already exists gets a numeric suffix
+											(web01-2); a machine that is already enrolled is refused.
 										</p>
 									</div>
 								)}

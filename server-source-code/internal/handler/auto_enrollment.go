@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -476,6 +477,39 @@ func (h *AutoEnrollmentHandler) Enroll(w http.ResponseWriter, r *http.Request) {
 	machineID := req.MachineID
 	if machineID == "" {
 		machineID = "pending-" + uuid.New().String()
+	} else {
+		// The same machine enrolling twice is a reinstall or a copied token,
+		// never a second host: refuse and name the existing host so the
+		// operator can delete it on purpose.
+		if id, name, found, ferr := h.hosts.ForkFindByMachineID(ctx, machineID); ferr != nil {
+			if h.log != nil {
+				h.log.Error("auto-enrollment machine id lookup failed", "error", ferr)
+			}
+			Error(w, http.StatusInternalServerError, "Failed to enroll host")
+			return
+		} else if found {
+			JSON(w, http.StatusConflict, map[string]interface{}{
+				"error":   "Host already enrolled",
+				"message": "A host with this machine ID is already enrolled. Delete it first to enroll this machine again.",
+				"host":    map[string]interface{}{"id": id, "friendly_name": name},
+			})
+			return
+		}
+	}
+	// Two customers may both have a "web01": the newcomer gets the lowest
+	// free numeric suffix instead of a silent duplicate.
+	friendlyName := req.FriendlyName
+	if taken, nerr := h.hosts.ForkFriendlyNamesLike(ctx, friendlyName); nerr != nil {
+		if h.log != nil {
+			h.log.Error("auto-enrollment name lookup failed", "error", nerr)
+		}
+		Error(w, http.StatusInternalServerError, "Failed to enroll host")
+		return
+	} else if unique := uniqueFriendlyName(friendlyName, taken); unique != friendlyName {
+		if h.log != nil {
+			h.log.Info("auto-enrollment: friendly name taken, suffixed", "requested", friendlyName, "assigned", unique)
+		}
+		friendlyName = unique
 	}
 
 	// Enforce host limit if a package is applied.
@@ -495,7 +529,7 @@ func (h *AutoEnrollmentHandler) Enroll(w http.ResponseWriter, r *http.Request) {
 
 	host := &models.Host{
 		MachineID:              &machineID,
-		FriendlyName:           req.FriendlyName,
+		FriendlyName:           friendlyName,
 		OSType:                 "unknown",
 		OSVersion:              "unknown",
 		Status:                 "pending",
@@ -524,7 +558,7 @@ func (h *AutoEnrollmentHandler) Enroll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.log != nil {
-		h.log.Info("Auto-enrolled host", "friendly_name", req.FriendlyName, "host_id", host.ID, "token", token.TokenName)
+		h.log.Info("Auto-enrolled host", "friendly_name", friendlyName, "host_id", host.ID, "token", token.TokenName)
 	}
 
 	var hostGroup *store.HostGroupBrief
@@ -633,9 +667,11 @@ func (h *AutoEnrollmentHandler) ServeScript(w http.ResponseWriter, r *http.Reque
 		script = agents.ProxmoxAutoEnrollScript
 	case "direct-host":
 		script = agents.DirectHostAutoEnrollScript
+	case scriptTypeDirectHostWindows:
+		script = agents.DirectHostAutoEnrollWindowsScript
 	default:
 		JSON(w, http.StatusBadRequest, map[string]string{
-			"error": "Invalid script type: " + scriptType + ". Supported types: proxmox-lxc, direct-host",
+			"error": "Invalid script type: " + scriptType + ". Supported types: proxmox-lxc, direct-host, direct-host-windows",
 		})
 		return
 	}
@@ -676,6 +712,11 @@ func (h *AutoEnrollmentHandler) ServeScript(w http.ResponseWriter, r *http.Reque
 				curlFlags = "-sk"
 			}
 		}
+	}
+
+	if scriptType == scriptTypeDirectHostWindows {
+		h.serveWindowsEnrollScript(w, script, serverURL, token.TokenKey, tokenSecret, curlFlags == "-sk", forceInstall)
+		return
 	}
 
 	shebang := "#!/bin/sh"
@@ -758,3 +799,55 @@ func validateScopes(raw json.RawMessage) error {
 type scopeError struct{ msg string }
 
 func (e *scopeError) Error() string { return e.msg }
+
+// scriptTypeDirectHostWindows is the PowerShell variant of direct-host.
+const scriptTypeDirectHostWindows = "direct-host-windows"
+
+// serveWindowsEnrollScript prepends the token as $env: variables (the same
+// names the shell variant exports) and serves the PowerShell script; it runs
+// as "irm <url> | iex" in an elevated PowerShell.
+func (h *AutoEnrollmentHandler) serveWindowsEnrollScript(w http.ResponseWriter, script []byte, serverURL, tokenKey, tokenSecret string, ignoreSSL, forceInstall bool) {
+	yesNo := map[bool]string{true: "true", false: "false"}
+	envBlock := "$env:PATCHMON_URL = \"" + serverURL + "\"\n" +
+		"$env:AUTO_ENROLLMENT_KEY = \"" + tokenKey + "\"\n" +
+		"$env:AUTO_ENROLLMENT_SECRET = \"" + tokenSecret + "\"\n" +
+		"$env:PATCHMON_IGNORE_SSL = \"" + yesNo[ignoreSSL] + "\"\n" +
+		"$env:FORCE_INSTALL = \"" + yesNo[forceInstall] + "\"\n\n"
+	body := strings.ReplaceAll(string(script), "\r\n", "\n")
+	w.Header().Set("Content-Type", "text/plain")
+	w.Header().Set("Content-Disposition", "inline; filename=\"direct_host_auto_enroll_windows.ps1\"")
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(envBlock + body))
+}
+
+// uniqueFriendlyName returns name when no existing name equals it (ignoring
+// case), otherwise name with the lowest free suffix "-2", "-3", ... Names
+// with a non-numeric suffix (web01-x) do not block a number.
+func uniqueFriendlyName(name string, existing []string) string {
+	base := strings.ToLower(name)
+	taken := false
+	used := map[int]bool{}
+	for _, e := range existing {
+		l := strings.ToLower(e)
+		if l == base {
+			taken = true
+			continue
+		}
+		if !strings.HasPrefix(l, base+"-") {
+			continue
+		}
+		if n, err := strconv.Atoi(l[len(base)+1:]); err == nil && n >= 2 {
+			used[n] = true
+		}
+	}
+	if !taken {
+		return name
+	}
+	for n := 2; ; n++ {
+		if !used[n] {
+			return name + "-" + strconv.Itoa(n)
+		}
+	}
+}

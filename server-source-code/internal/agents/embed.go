@@ -35,3 +35,9 @@ var PatchmonWindowsInstallScript []byte
 //
 //go:embed patchmon_remove_windows.ps1
 var PatchmonWindowsRemoveScript []byte
+
+// DirectHostAutoEnrollWindowsScript is served at
+// GET /api/v1/auto-enrollment/script?type=direct-host-windows (fork).
+//
+//go:embed direct_host_auto_enroll_windows.ps1
+var DirectHostAutoEnrollWindowsScript []byte

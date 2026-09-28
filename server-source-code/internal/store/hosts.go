@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/PatchMon/PatchMon/server-source-code/internal/database"
@@ -10,6 +11,7 @@ import (
 	"github.com/PatchMon/PatchMon/server-source-code/internal/pgtime"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/safeconv"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // HostsStore provides host access via sqlc.
@@ -453,4 +455,25 @@ func (s *HostsStore) ListForScopedApi(ctx context.Context, groupIDs []string, in
 	}
 
 	return hosts, groupsMap, statsMap, nil
+}
+
+// ForkFindByMachineID returns the id and friendly name of the host enrolled
+// with this machine id, or found=false. Used by auto-enrollment to refuse a
+// second host for the same machine.
+func (s *HostsStore) ForkFindByMachineID(ctx context.Context, machineID string) (id, friendlyName string, found bool, err error) {
+	row, err := s.db.DB(ctx).Queries.ForkGetHostByMachineID(ctx, &machineID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, err
+	}
+	return row.ID, row.FriendlyName, true, nil
+}
+
+// ForkFriendlyNamesLike lists the friendly names that could collide with a
+// new host called name: the name itself or the name with a suffix, ignoring
+// case.
+func (s *HostsStore) ForkFriendlyNamesLike(ctx context.Context, name string) ([]string, error) {
+	return s.db.DB(ctx).Queries.ForkListHostFriendlyNamesLike(ctx, name)
 }

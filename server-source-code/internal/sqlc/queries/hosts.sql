@@ -123,3 +123,15 @@ SET fork_boot_time = sqlc.arg('boot_time')::timestamptz
 WHERE id = sqlc.arg('id')
   AND (fork_boot_time IS NULL
        OR ABS(EXTRACT(EPOCH FROM (fork_boot_time - sqlc.arg('boot_time')::timestamptz))) >= 10);
+
+-- name: ForkGetHostByMachineID :one
+-- Fork: auto-enrollment refuses a second host for a machine that is already
+-- enrolled (409 with the existing host) instead of creating a duplicate.
+SELECT id, friendly_name FROM hosts WHERE machine_id = sqlc.arg('machine_id') ORDER BY created_at LIMIT 1;
+
+-- name: ForkListHostFriendlyNamesLike :many
+-- Fork: names that collide with a new host name: the name itself or the
+-- name with a numeric suffix, case-insensitive. The caller picks the suffix.
+SELECT friendly_name FROM hosts
+WHERE lower(friendly_name) = lower(sqlc.arg('name'))
+   OR lower(friendly_name) LIKE lower(sqlc.arg('name')) || '-%';

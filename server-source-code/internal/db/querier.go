@@ -242,6 +242,9 @@ type Querier interface {
 	ForkClaimScheduledReportSlot(ctx context.Context, arg ForkClaimScheduledReportSlotParams) (int64, error)
 	// Only a pending row transitions; a second finalize of the same run is a no-op.
 	ForkFinishReportArchive(ctx context.Context, arg ForkFinishReportArchiveParams) (int64, error)
+	// Fork: auto-enrollment refuses a second host for a machine that is already
+	// enrolled (409 with the existing host) instead of creating a duplicate.
+	ForkGetHostByMachineID(ctx context.Context, machineID *string) (ForkGetHostByMachineIDRow, error)
 	ForkGetReportArchiveByRunKey(ctx context.Context, runKey string) (ForkGetReportArchiveByRunKeyRow, error)
 	ForkGetReportArchiveContent(ctx context.Context, id string) (ForkGetReportArchiveContentRow, error)
 	ForkGetReportArchivePDF(ctx context.Context, id string) (ForkGetReportArchivePDFRow, error)
@@ -250,6 +253,9 @@ type Querier interface {
 	ForkGetScheduledReportForUpdate(ctx context.Context, id string) (ScheduledReport, error)
 	ForkInsertReportArchive(ctx context.Context, arg ForkInsertReportArchiveParams) error
 	ForkInsertReportDelivery(ctx context.Context, arg ForkInsertReportDeliveryParams) error
+	// Fork: names that collide with a new host name: the name itself or the
+	// name with a numeric suffix, case-insensitive. The caller picks the suffix.
+	ForkListHostFriendlyNamesLike(ctx context.Context, name string) ([]string, error)
 	ForkListReportArchive(ctx context.Context, arg ForkListReportArchiveParams) ([]ForkListReportArchiveRow, error)
 	ForkListReportDeliveries(ctx context.Context, archiveID string) ([]ForkReportDelivery, error)
 	ForkListReportDeliveriesForReport(ctx context.Context, scheduledReportID string) ([]ForkReportDelivery, error)
