@@ -226,11 +226,14 @@ const Integrations = () => {
 	const curl_flags = settings?.ignore_ssl_self_signed ? "-sk" : "-s";
 	// Windows enrollment: the script is fetched over HTTPS by PowerShell, so a
 	// self-signed server certificate needs the validation callback first.
-	const windowsEnrollmentCommand = `${
-		settings?.ignore_ssl_self_signed
-			? "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }; "
-			: ""
-	}irm "${getEnrollmentUrl("direct-host-windows")}" | iex`;
+	// A function, not a value: it reads new_token, which only exists right
+	// after a token was created (the page itself renders without one).
+	const getWindowsEnrollmentCommand = () =>
+		`${
+			settings?.ignore_ssl_self_signed
+				? "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }; "
+				: ""
+		}irm "${getEnrollmentUrl("direct-host-windows")}" | iex`;
 
 	// biome-ignore lint/correctness/useExhaustiveDependencies: Only run on mount
 	useEffect(() => {
@@ -2380,7 +2383,7 @@ const Integrations = () => {
 										<div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
 											<input
 												type="text"
-												value={windowsEnrollmentCommand}
+												value={getWindowsEnrollmentCommand()}
 												readOnly
 												className="flex-1 px-3 py-2 border border-secondary-300 dark:border-secondary-600 rounded-md bg-secondary-50 dark:bg-secondary-900 text-secondary-900 dark:text-white font-mono text-xs break-all"
 											/>
@@ -2388,7 +2391,7 @@ const Integrations = () => {
 												type="button"
 												onClick={() =>
 													copy_to_clipboard(
-														windowsEnrollmentCommand,
+														getWindowsEnrollmentCommand(),
 														"direct-enrollment-command-windows",
 													)
 												}
