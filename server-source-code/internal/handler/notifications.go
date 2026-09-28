@@ -568,7 +568,7 @@ type reportDeliveryPlan struct {
 // drops destination ids that no longer exist or are of type internal (the
 // worker skips them anyway), so a stale id never blocks a save and a report
 // can always be disabled.
-func (h *NotificationsHandler) validateReportDelivery(ctx context.Context, in reportDeliveryInput) (reportDeliveryPlan, error) {
+func (h *NotificationsHandler) validateReportDelivery(ctx context.Context, q *db.Queries, in reportDeliveryInput) (reportDeliveryPlan, error) {
 	plan := reportDeliveryPlan{DestinationIDs: []string{}}
 	if in.Recipients != nil {
 		parsed, err := reports.ParseRecipients(*in.Recipients)
@@ -580,7 +580,6 @@ func (h *NotificationsHandler) validateReportDelivery(ctx context.Context, in re
 		plan.CustomerMode = parsed != nil
 	}
 	strict := plan.CustomerMode && in.Enabled
-	q := h.q(ctx)
 	dests := make([]db.NotificationDestination, 0, len(in.DestIDs))
 	for _, id := range in.DestIDs {
 		dst, err := q.GetNotificationDestinationByID(ctx, id)
@@ -700,7 +699,7 @@ func destinationIDsOf(raw []byte) []string {
 
 // validatedDefinition parses a submitted report definition strictly, checks
 // that every host group exists, and returns the normalised JSON (version 2).
-func (h *NotificationsHandler) validatedDefinition(ctx context.Context, raw map[string]interface{}) ([]byte, error) {
+func (h *NotificationsHandler) validatedDefinition(ctx context.Context, q *db.Queries, raw map[string]interface{}) ([]byte, error) {
 	in, _ := json.Marshal(raw)
 	if raw == nil {
 		in = []byte("{}")
@@ -709,7 +708,7 @@ func (h *NotificationsHandler) validatedDefinition(ctx context.Context, raw map[
 	if err != nil {
 		return nil, err
 	}
-	if _, err := reports.ValidateGroupIDs(ctx, h.q(ctx), def.HostGroupIDs); err != nil {
+	if _, err := reports.ValidateGroupIDs(ctx, q, def.HostGroupIDs); err != nil {
 		return nil, err
 	}
 	out, err := json.Marshal(def)
@@ -786,7 +785,7 @@ func (h *NotificationsHandler) CreateScheduledReport(w http.ResponseWriter, r *h
 		cron = "0 8 * * *"
 	}
 	tz := h.timezoneForRequest(r.Context())
-	def, err := h.validatedDefinition(r.Context(), req.Definition)
+	def, err := h.validatedDefinition(r.Context(), h.q(r.Context()), req.Definition)
 	if err != nil {
 		Error(w, definitionErrorStatus(err), definitionErrorText(err))
 		return
@@ -800,7 +799,7 @@ func (h *NotificationsHandler) CreateScheduledReport(w http.ResponseWriter, r *h
 		Error(w, http.StatusBadRequest, "Invalid cron_expr")
 		return
 	}
-	plan, err := h.validateReportDelivery(r.Context(), reportDeliveryInput{
+	plan, err := h.validateReportDelivery(r.Context(), h.q(r.Context()), reportDeliveryInput{
 		Recipients: req.EmailRecipients, DestIDs: req.DestinationIDs, CronExpr: cron, Timezone: tz, Enabled: en, Definition: def,
 	})
 	if err != nil {
@@ -878,7 +877,8 @@ func (h *NotificationsHandler) UpdateScheduledReport(w http.ResponseWriter, r *h
 	ctx := r.Context()
 	d := h.db.DB(ctx)
 	// Lock the row first: the worker's slot claim writes next_run_at and
-	// last_run_at, and this update must never write back stale values.
+	// last_run_at, and this update must never write back stale values. All
+	// validation reads go through the same transaction (one pool connection).
 	tx, err := d.Begin(ctx)
 	if err != nil {
 		Error(w, http.StatusInternalServerError, "Failed to update")
@@ -925,7 +925,7 @@ func (h *NotificationsHandler) UpdateScheduledReport(w http.ResponseWriter, r *h
 	def := ex.Definition
 	if req.Definition != nil {
 		var derr error
-		def, derr = h.validatedDefinition(ctx, req.Definition)
+		def, derr = h.validatedDefinition(ctx, q, req.Definition)
 		if derr != nil {
 			Error(w, definitionErrorStatus(derr), definitionErrorText(derr))
 			return
@@ -954,7 +954,7 @@ func (h *NotificationsHandler) UpdateScheduledReport(w http.ResponseWriter, r *h
 		}
 		recipients = &list
 	}
-	plan, err := h.validateReportDelivery(ctx, reportDeliveryInput{
+	plan, err := h.validateReportDelivery(ctx, q, reportDeliveryInput{
 		Recipients: recipients, DestIDs: destIDs, CronExpr: cron, Timezone: tz, Enabled: en, Definition: def,
 	})
 	if err != nil {

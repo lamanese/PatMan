@@ -379,3 +379,41 @@ func TestReportRunWithDeliveryOffArchivesWithoutSending(t *testing.T) {
 		t.Fatalf("run=%s err=%v", runStatus, err)
 	}
 }
+
+// A report disabled between attempts ends its pending run at once. When some
+// deliveries were already sent, the run is partial (the mails went out), not
+// failed; only a run with nothing sent is failed/abandoned.
+func TestReportRunDisabledAfterPartialSendIsPartial(t *testing.T) {
+	d := newPatchRunCleanupTestDB(t)
+	rec := installMailRecorder(t)
+	insertTestHost(t, d, "h1")
+	slot := time.Now().UTC().Truncate(time.Second).Add(-time.Minute)
+	rep := insertReport(t, d, "Weekly", slot, insertEmailDestination(t, d, "SMTP"), []string{"a@example.com", "b@example.com"})
+	rec.failFor["b@example.com"] = errors.New("dial tcp: connection refused")
+	reportRetryState = func(context.Context) (int, int) { return 0, 3 }
+	h := NewScheduledReportRunHandler(d, nil, nil, nil, discardTestLogger())
+	if err := h.ProcessTask(context.Background(), scheduledTask(rep, slot)); err == nil {
+		t.Fatal("first attempt with a retryable failure must ask for a retry")
+	}
+	if rec.count("a@example.com") != 1 {
+		t.Fatalf("a@example.com sent %d times, want 1", rec.count("a@example.com"))
+	}
+	if _, err := d.Exec(context.Background(), `UPDATE scheduled_reports SET enabled = false WHERE id = $1`, rep); err != nil {
+		t.Fatal(err)
+	}
+	reportRetryState = func(context.Context) (int, int) { return 1, 3 }
+	if err := h.ProcessTask(context.Background(), scheduledTask(rep, slot)); err != nil {
+		t.Fatalf("disabled report must finalize, not retry: %v", err)
+	}
+	if rec.count("b@example.com") != 0 {
+		t.Fatal("a disabled report must not send")
+	}
+	status, _, _ := archiveRow(t, d, rep)
+	var runStatus, code string
+	if err := d.RawQueryRow(context.Background(), `SELECT r.status, d.error_code FROM scheduled_report_runs r, fork_report_deliveries d WHERE r.scheduled_report_id = $1 AND d.recipient = 'b@example.com'`, rep).Scan(&runStatus, &code); err != nil {
+		t.Fatal(err)
+	}
+	if status != "partial" || runStatus != "partial" || code != "smtp_connect" {
+		t.Fatalf("status=%s run=%s code=%s, want partial/partial/smtp_connect", status, runStatus, code)
+	}
+}

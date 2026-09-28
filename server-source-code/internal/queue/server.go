@@ -51,6 +51,8 @@ func (h *loggingHandlerImpl) ProcessTask(ctx context.Context, t *asynq.Task) err
 func NewServer(opts asynq.RedisClientOpt, registry *agentregistry.Registry, db *database.DB, log *slog.Logger) *asynq.Server {
 	srv := asynq.NewServer(opts, asynq.Config{
 		Concurrency: 10,
+		// Report runs retry slowly (greylisting), everything else keeps the default.
+		RetryDelayFunc: retryDelay,
 		Queues: map[string]int{
 			QueueAgentCommands:               3,
 			QueueHostStatus:                  3,

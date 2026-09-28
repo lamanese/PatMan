@@ -31,15 +31,17 @@ import {
 	errorFromBlobResponse,
 	filenameFromDisposition,
 } from "../../utils/downloadBlob";
+import {
+	CHANNEL_TYPES,
+	channelIcon,
+	INPUT,
+	SELECT,
+} from "./notificationShared";
 import ReportArchiveDialog from "./ReportArchiveDialog";
 import ReportModal, {
 	buildReportSummary,
-	CHANNEL_TYPES,
-	channelIcon,
 	describeSchedule,
-	INPUT,
 	ReportConfirmDialog,
-	SELECT,
 } from "./ReportModal";
 
 /* ───────────────────── Constants ───────────────────── */
@@ -805,9 +807,15 @@ export const NotificationPanel = ({ panel }) => {
 		queryFn: () => hostGroupsAPI.list().then((r) => r.data ?? []),
 		enabled: canManage && canListHostGroups,
 	});
+	// Every host for the route picker. The admin list is paginated and wraps
+	// the rows in data.data; "hosts-list" (other pages) caches that wrapper,
+	// so this query has its own key.
 	const { data: hostsList = [] } = useQuery({
-		queryKey: ["hosts-list"],
-		queryFn: () => adminHostsAPI.list().then((r) => r.data ?? []),
+		queryKey: ["hosts-list", "all"],
+		queryFn: () =>
+			adminHostsAPI
+				.list({ all: true })
+				.then((r) => (Array.isArray(r.data?.data) ? r.data.data : [])),
 		enabled: canManage && canListHostGroups,
 	});
 

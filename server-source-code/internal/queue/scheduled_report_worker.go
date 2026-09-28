@@ -258,9 +258,11 @@ func (h *ScheduledReportRunHandler) ProcessTask(ctx context.Context, t *asynq.Ta
 }
 
 // abandonDisabledRun ends a run whose report was disabled between attempts:
-// a pending archive row for this run key is finalized as failed/abandoned
-// (its never-attempted deliveries too; failed ones keep their code) instead
-// of waiting for the 24 h rule. Nothing is sent.
+// a pending archive row for this run key is finalized at once instead of
+// waiting for the 24 h rule. Never-attempted deliveries become
+// failed/abandoned, failed ones keep their code. Nothing is sent. A run
+// with at least one sent delivery ends as partial (those mails went out),
+// one with none as failed.
 func (h *ScheduledReportRunHandler) abandonDisabledRun(ctx context.Context, d *database.DB, reportID, runKey string) error {
 	arch, err := d.Queries.ForkGetReportArchiveByRunKey(ctx, runKey)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -273,33 +275,43 @@ func (h *ScheduledReportRunHandler) abandonDisabledRun(ctx context.Context, d *d
 		return nil
 	}
 	const msg = "report was disabled before the run finished"
-	if err := h.abandonUnsentDeliveries(ctx, d, arch.ID, msg); err != nil {
+	sent, err := h.abandonUnsentDeliveries(ctx, d, arch.ID, msg)
+	if err != nil {
 		return err
 	}
-	h.logInfo("scheduled_report: report disabled, pending run abandoned", "report_id", reportID, "archive_id", arch.ID)
-	return h.finalizeRun(ctx, d, reportID, arch.ID, "failed", reports.CodeAbandoned, msg, "")
+	status := "failed"
+	if sent > 0 {
+		status = "partial"
+	}
+	h.logInfo("scheduled_report: report disabled, pending run abandoned", "report_id", reportID, "archive_id", arch.ID, "status", status, "sent", sent)
+	return h.finalizeRun(ctx, d, reportID, arch.ID, status, reports.CodeAbandoned, msg, "")
 }
 
 // abandonUnsentDeliveries marks every still pending delivery of the archive
-// as failed/abandoned (detached context, like every status write).
-func (h *ScheduledReportRunHandler) abandonUnsentDeliveries(ctx context.Context, d *database.DB, archiveID, msg string) error {
+// as failed/abandoned (detached context, like every status write) and
+// returns how many deliveries were already sent.
+func (h *ScheduledReportRunHandler) abandonUnsentDeliveries(ctx context.Context, d *database.DB, archiveID, msg string) (int, error) {
 	markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reportMarkTimeout)
 	defer cancel()
 	dels, err := d.Queries.ForkListReportDeliveries(markCtx, archiveID)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	code := reports.CodeAbandoned
+	sent := 0
 	for _, del := range dels {
+		if del.Status == "sent" {
+			sent++
+		}
 		if del.Status != "pending" {
 			continue
 		}
 		m := msg
 		if err := d.Queries.ForkMarkReportDelivery(markCtx, db.ForkMarkReportDeliveryParams{ID: del.ID, Status: "failed", ErrorCode: &code, ErrorMessage: &m}); err != nil {
-			return err
+			return sent, err
 		}
 	}
-	return nil
+	return sent, nil
 }
 
 // openArchive claims the slot (scheduled runs) and inserts the pending archive

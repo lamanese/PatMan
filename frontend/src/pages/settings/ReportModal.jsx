@@ -1,16 +1,7 @@
-import {
-	Bell,
-	Check,
-	Clock,
-	Globe,
-	Loader2,
-	Mail,
-	Send,
-	X,
-} from "lucide-react";
+import { Check, Clock, Loader2, Send, X } from "lucide-react";
 import { Fragment, useState } from "react";
-import { SiDiscord, SiNtfy, SiSlack } from "react-icons/si";
 import { useToast } from "../../contexts/ToastContext";
+import { INPUT, SELECT } from "./notificationShared";
 
 const REPORT_SECTIONS = [
 	{ id: "executive_summary", label: "Executive summary" },
@@ -122,34 +113,6 @@ export const buildReportSummary = ({
 	};
 };
 
-export const CHANNEL_TYPES = [
-	{
-		value: "webhook",
-		label: "Webhook",
-		description: "Generic, Discord, or Slack",
-		icon: Globe,
-		brandIcons: { discord: SiDiscord, slack: SiSlack },
-	},
-	{
-		value: "email",
-		label: "Email",
-		description: "SMTP delivery",
-		icon: Mail,
-	},
-	{
-		value: "ntfy",
-		label: "ntfy",
-		description: "Push notifications via ntfy.sh",
-		icon: SiNtfy,
-	},
-	{
-		value: "internal",
-		label: "Internal Alerts",
-		description: "Alert records in the Alerts tab",
-		icon: Bell,
-	},
-];
-
 const FREQUENCY_OPTIONS = [
 	{ value: "daily", label: "Daily" },
 	{ value: "weekdays", label: "Weekdays (Mon-Fri)" },
@@ -233,17 +196,6 @@ export const describeSchedule = (expr) => {
 	}
 	return expr;
 };
-
-export const channelIcon = (type) => {
-	const ct = CHANNEL_TYPES.find((c) => c.value === type);
-	if (!ct) return null;
-	const Icon = ct.icon;
-	return <Icon className="h-4 w-4" />;
-};
-
-export const INPUT =
-	"w-full px-3 py-2 bg-white dark:bg-secondary-900 border border-secondary-300 dark:border-secondary-600 rounded-md text-sm text-secondary-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-primary-500 placeholder-secondary-400";
-export const SELECT = `${INPUT} appearance-none`;
 
 /* ───────────────── Report Modal ───────────────── */
 
@@ -586,7 +538,7 @@ const ReportModal = ({
 		<>
 			<div
 				className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-				onClick={onClose}
+				onClick={isPending ? undefined : onClose}
 			>
 				<div
 					className="bg-white dark:bg-secondary-800 rounded-lg shadow-xl max-w-lg w-full mx-4 relative z-10 max-h-[90vh] overflow-y-auto"
@@ -603,7 +555,9 @@ const ReportModal = ({
 						<button
 							type="button"
 							onClick={onClose}
-							className="text-secondary-400 hover:text-secondary-600 dark:hover:text-white"
+							disabled={isPending}
+							aria-label="Close"
+							className="text-secondary-400 hover:text-secondary-600 dark:hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
 						>
 							<X className="h-5 w-5" />
 						</button>
@@ -644,10 +598,14 @@ const ReportModal = ({
 						</div>
 
 						<div>
-							<label className="block text-sm font-medium text-secondary-700 dark:text-white mb-1">
+							<label
+								htmlFor="report-name"
+								className="block text-sm font-medium text-secondary-700 dark:text-white mb-1"
+							>
 								Report name <span className="text-danger-500">*</span>
 							</label>
 							<input
+								id="report-name"
 								className={INPUT}
 								placeholder="Weekly ops report"
 								value={form.name}
@@ -656,11 +614,15 @@ const ReportModal = ({
 						</div>
 
 						<div>
-							<label className="block text-sm font-medium text-secondary-700 dark:text-white mb-2">
+							<label
+								htmlFor="report-frequency"
+								className="block text-sm font-medium text-secondary-700 dark:text-white mb-2"
+							>
 								Schedule
 							</label>
 							<div className="flex flex-wrap gap-3 items-center">
 								<select
+									id="report-frequency"
 									className={`${SELECT} w-auto`}
 									value={form.frequency}
 									onChange={(e) => upd("frequency", e.target.value)}
@@ -771,7 +733,10 @@ const ReportModal = ({
 						{isCustomer && (
 							<>
 								<div>
-									<label className="block text-sm font-medium text-secondary-700 dark:text-white mb-1">
+									<label
+										htmlFor="report-recipient"
+										className="block text-sm font-medium text-secondary-700 dark:text-white mb-1"
+									>
 										Recipients <span className="text-danger-500">*</span>
 									</label>
 									{form.email_recipients.length > 0 && (
@@ -795,6 +760,7 @@ const ReportModal = ({
 										</div>
 									)}
 									<input
+										id="report-recipient"
 										className={INPUT}
 										type="text"
 										inputMode="email"
@@ -822,7 +788,10 @@ const ReportModal = ({
 								</div>
 
 								<div>
-									<label className="block text-sm font-medium text-secondary-700 dark:text-white mb-1">
+									<label
+										htmlFor="report-smtp"
+										className="block text-sm font-medium text-secondary-700 dark:text-white mb-1"
+									>
 										SMTP account <span className="text-danger-500">*</span>
 									</label>
 									{emailAccounts.length === 0 ? (
@@ -831,6 +800,7 @@ const ReportModal = ({
 										</p>
 									) : (
 										<select
+											id="report-smtp"
 											className={SELECT}
 											value={smtpValid ? form.smtp_destination_id : ""}
 											onChange={(e) =>
@@ -943,10 +913,14 @@ const ReportModal = ({
 
 						<div className="grid grid-cols-2 gap-4">
 							<div>
-								<label className="block text-sm font-medium text-secondary-700 dark:text-white mb-1">
+								<label
+									htmlFor="report-language"
+									className="block text-sm font-medium text-secondary-700 dark:text-white mb-1"
+								>
 									Language
 								</label>
 								<select
+									id="report-language"
 									className={INPUT}
 									value={form.language}
 									onChange={(e) => upd("language", e.target.value)}
@@ -959,10 +933,14 @@ const ReportModal = ({
 								</select>
 							</div>
 							<div>
-								<label className="block text-sm font-medium text-secondary-700 dark:text-white mb-1">
+								<label
+									htmlFor="report-period"
+									className="block text-sm font-medium text-secondary-700 dark:text-white mb-1"
+								>
 									Activity period
 								</label>
 								<select
+									id="report-period"
 									className={INPUT}
 									value={form.period_days}
 									onChange={(e) => upd("period_days", Number(e.target.value))}
@@ -982,10 +960,14 @@ const ReportModal = ({
 
 						<div className="grid grid-cols-2 gap-4">
 							<div>
-								<label className="block text-sm font-medium text-secondary-700 dark:text-white mb-1">
+								<label
+									htmlFor="report-top-hosts"
+									className="block text-sm font-medium text-secondary-700 dark:text-white mb-1"
+								>
 									Top rows per section
 								</label>
 								<input
+									id="report-top-hosts"
 									className={INPUT}
 									type="number"
 									min={1}
@@ -1007,10 +989,14 @@ const ReportModal = ({
 
 						<div className="grid grid-cols-2 gap-4">
 							<div>
-								<label className="block text-sm font-medium text-secondary-700 dark:text-white mb-1">
+								<label
+									htmlFor="report-archive-keep"
+									className="block text-sm font-medium text-secondary-700 dark:text-white mb-1"
+								>
 									Archive retention (runs)
 								</label>
 								<input
+									id="report-archive-keep"
 									className={INPUT}
 									type="number"
 									min={ARCHIVE_KEEP_MIN}
@@ -1057,7 +1043,12 @@ const ReportModal = ({
 						)}
 					</div>
 					<div className="px-6 py-4 border-t border-secondary-200 dark:border-secondary-600 flex justify-end gap-2 sticky bottom-0 bg-white dark:bg-secondary-800">
-						<button type="button" className="btn-outline" onClick={onClose}>
+						<button
+							type="button"
+							className="btn-outline"
+							onClick={onClose}
+							disabled={isPending}
+						>
 							Cancel
 						</button>
 						<button

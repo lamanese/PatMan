@@ -8,7 +8,7 @@ import {
 	errorFromBlobResponse,
 	filenameFromDisposition,
 } from "../../utils/downloadBlob";
-import { channelIcon } from "./ReportModal";
+import { channelIcon } from "./notificationShared";
 
 const ERROR_LABELS = {
 	definition_invalid: "Invalid report definition",
@@ -66,6 +66,13 @@ const ReportArchiveDialog = ({ report, onClose }) => {
 				if (!Array.isArray(r.data)) throw new Error("Unexpected response");
 				return r.data;
 			}),
+		// A run in progress is polled so its status and PDF appear without
+		// reopening the dialog; a finished list is fetched once.
+		refetchInterval: (query) =>
+			Array.isArray(query.state.data) &&
+			query.state.data.some((run) => run.status === "pending")
+				? 5000
+				: false,
 	});
 
 	const download = async (run) => {
