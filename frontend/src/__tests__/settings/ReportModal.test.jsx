@@ -27,6 +27,27 @@ describe("ReportModal", () => {
 		expect(screen.getByRole("button", { name: "Close" })).toBeDisabled();
 	});
 
+	it("lists a non-internal destination with its channel icon", () => {
+		renderModal({
+			destinations: [
+				{
+					id: "internal-alerts",
+					channel_type: "internal",
+					display_name: "Internal Alerts",
+					enabled: true,
+				},
+				{
+					id: "smtp-1",
+					channel_type: "email",
+					display_name: "Patch Management Report",
+					enabled: true,
+				},
+			],
+		});
+		expect(screen.getByText("Patch Management Report")).toBeInTheDocument();
+		expect(screen.queryByText("Internal Alerts")).not.toBeInTheDocument();
+	});
+
 	it("links every single-field label to its control", () => {
 		renderModal();
 		expect(screen.getByLabelText(/Report name/)).toBeInstanceOf(

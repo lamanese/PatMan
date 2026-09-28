@@ -41,6 +41,7 @@
 				"noStaticElementInteractions": "off"
 			},
 			"correctness": {
+				"noUndeclaredVariables": "error",
 				"useExhaustiveDependencies": "warn",
 				"noUnusedVariables": "warn",
 				"noUnusedFunctionParameters": "warn"

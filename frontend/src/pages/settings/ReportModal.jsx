@@ -1,7 +1,7 @@
 import { Check, Clock, Loader2, Send, X } from "lucide-react";
 import { Fragment, useState } from "react";
 import { useToast } from "../../contexts/ToastContext";
-import { INPUT, SELECT } from "./notificationShared";
+import { channelIcon, INPUT, SELECT } from "./notificationShared";
 
 const REPORT_SECTIONS = [
 	{ id: "executive_summary", label: "Executive summary" },
