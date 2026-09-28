@@ -21,7 +21,7 @@ func sampleModel(lang string, customer bool) *Model {
 		GeneratedAt: now, PeriodDays: 30, PeriodFrom: now.Add(-30 * 24 * time.Hour), PeriodTo: now,
 		Groups: []GroupRef{{ID: "g1", Name: "Group \"A\""}}, CustomerMode: customer, HostCount: 2,
 		Sections:         append([]string(nil), KnownSections...),
-		ExecutiveSummary: &ExecutiveSummary{HostCount: 2, ScannedHosts: 1, AverageScore: 40.5, HostsCritical: 1, RunsTotal: 3, RunsCompleted: 2, RunsFailed: 1},
+		ExecutiveSummary: &ExecutiveSummary{HostCount: 2, ComplianceIncluded: true, ScannedHosts: 1, AverageScore: 40.5, HostsCritical: 1, RunsTotal: 3, RunsCompleted: 2, RunsFailed: 1},
 		ComplianceSummary: &ComplianceSummary{PassedRules: 10, FailedRules: 15, HostsCritical: 1, Unscanned: 1, ScannedHosts: 1, AverageScore: 40.5,
 			Worst: []ComplianceRow{{HostID: "h1", HostName: "<script>alert(1)</script>", Profile: "CIS", Score: &score, Passed: 10, Failed: 15, CompletedAt: now}}},
 		RecentPatchRuns:     &PatchRunList{Rows: []PatchRunRow{{ID: "r1", HostID: "h1", HostName: "web\" onmouseover=\"x", Status: "completed", PatchType: "patch_all", CreatedAt: now, CompletedAt: &now}}},
@@ -154,5 +154,31 @@ func TestRenderHTMLEmptySections(t *testing.T) {
 	m.Disks = nil
 	if _, err := RenderHTML(m, Branding{}); err != nil {
 		t.Fatalf("nil section data: %v", err)
+	}
+}
+
+func TestRenderHTMLExecutiveComplianceOnlyWhenIncluded(t *testing.T) {
+	tx := T("en")
+	render := func(es ExecutiveSummary) string {
+		m := sampleModel("en", true)
+		m.ExecutiveSummary = &es
+		m.ComplianceSummary = nil // the compliance section has its own KPIs
+		out, err := RenderHTML(m, Branding{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	excluded := render(ExecutiveSummary{HostCount: 2, RunsTotal: 3})
+	if strings.Contains(excluded, tx.S("kpi.avg_compliance")) || strings.Contains(excluded, tx.S("kpi.critical_hosts")) {
+		t.Fatal("compliance KPIs rendered although the report has no compliance section")
+	}
+	partial := render(ExecutiveSummary{HostCount: 2, ComplianceIncluded: true, ScannedHosts: 1, AverageScore: 40.5, HostsCritical: 1})
+	if !strings.Contains(partial, tx.F("kpi.avg_compliance_scanned", 1, 2)) {
+		t.Fatalf("partial coverage must say how many hosts were scanned:\n%s", partial)
+	}
+	none := render(ExecutiveSummary{HostCount: 2, ComplianceIncluded: true})
+	if !strings.Contains(none, tx.S("val.no_compliance_scans")) || strings.Contains(none, "0.0%") {
+		t.Fatalf("no scans must render a note, not 0.0%%:\n%s", none)
 	}
 }

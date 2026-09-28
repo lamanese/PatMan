@@ -3913,7 +3913,7 @@ Each report is a composition of **sections**, ticked independently:
 
 | Section | Content |
 |---------|---------|
-| **Executive summary** | Total hosts, average compliance score, critical hosts, compliant hosts, plus a patching overview (runs, completed, failed, running). |
+| **Executive summary** | Total hosts plus a patching overview (runs, completed, failed, running). The compliance KPIs (average score, critical hosts, compliant hosts) are included only when **Compliance summary** is selected as well; when only part of the scope has a completed scan the score label says so (for example "2 of 26 hosts scanned"), and without any scan a note replaces the figures. |
 | **Compliance summary** | Passed rules, failed rules, critical hosts, hosts with no recent scan. |
 | **Recent patch runs** | Latest patch runs by status with timestamps and target counts. |
 | **Hosts / status** | Host status rollup: offline, stale, active. |

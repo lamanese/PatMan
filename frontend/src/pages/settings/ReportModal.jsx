@@ -728,6 +728,11 @@ const ReportModal = ({
 									</label>
 								))}
 							</div>
+							<p className="mt-2 text-xs text-secondary-500">
+								Compliance figures (score, critical and compliant hosts) appear
+								in the executive summary only when Compliance summary is
+								selected.
+							</p>
 						</div>
 
 						{isCustomer && (

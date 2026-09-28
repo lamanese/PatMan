@@ -251,16 +251,21 @@ func complianceStats(rows []db.ForkReportComplianceLatestRow) complianceKPIs {
 // --- sections ---
 
 func (c *collector) executiveSummary() error {
-	rows, err := c.complianceRows()
-	if err != nil {
-		return err
+	es := &ExecutiveSummary{HostCount: c.m.HostCount}
+	// Compliance figures only when the report opts into the compliance
+	// module via its own section; the query is not even run otherwise.
+	if c.in.Def.HasSection(SectionComplianceSummary) {
+		rows, err := c.complianceRows()
+		if err != nil {
+			return err
+		}
+		k := complianceStats(rows)
+		es.ComplianceIncluded, es.ScannedHosts, es.AverageScore, es.HostsCritical, es.HostsCompliant = true, k.scanned, k.average, k.critical, k.compliant
 	}
-	k := complianceStats(rows)
 	stats, err := c.patchRunStats()
 	if err != nil {
 		return err
 	}
-	es := &ExecutiveSummary{HostCount: c.m.HostCount, ScannedHosts: k.scanned, AverageScore: k.average, HostsCritical: k.critical, HostsCompliant: k.compliant}
 	for _, s := range stats {
 		n := int(s.Cnt)
 		es.RunsTotal += n

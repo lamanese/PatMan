@@ -155,7 +155,7 @@ func TestRenderSectionsCoversEverySectionInOrder(t *testing.T) {
 	k := func(key, val string) string { return "kpi:" + tx.S("kpi."+key) + "=" + val }
 	kpiGroups := [][]string{
 		{"h2:" + tx.S("sec.executive_summary"),
-			k("total_hosts", "2#2563eb"), k("avg_compliance", "40.5%#dc2626"), k("critical_hosts", "1#dc2626"), k("compliant_hosts", "0#16a34a"),
+			k("total_hosts", "2#2563eb"), "kpi:" + tx.F("kpi.avg_compliance_scanned", 1, 2) + "=40.5%#dc2626", k("critical_hosts", "1#dc2626"), k("compliant_hosts", "0#16a34a"),
 			"h3:" + tx.S("sec.patching_overview") + " – " + tx.PeriodLabel(30),
 			k("runs_total", "3#6366f1"), k("runs_completed", "2#16a34a"), k("runs_failed", "1#dc2626"), k("runs_running", "0#d97706")},
 		{"h2:" + tx.S("sec.compliance_summary"),
@@ -291,5 +291,26 @@ func TestPDFTableWidthsSumToOneAndHostStatusFitsOneLine(t *testing.T) {
 				t.Errorf("%s: host_overview column %q truncates to %q at width %.1f mm", lang, col.Title, got, headInner)
 			}
 		}
+	}
+}
+
+func TestRenderPDFExecutiveComplianceOnlyWhenIncluded(t *testing.T) {
+	tx := T("en")
+	ops := func(es ExecutiveSummary) *recordingCanvas {
+		m := sampleModel("en", true)
+		m.ExecutiveSummary = &es
+		m.ComplianceSummary = nil // the compliance section has its own KPIs
+		rc := &recordingCanvas{}
+		renderSections(rc, m)
+		return rc
+	}
+	if rc := ops(ExecutiveSummary{HostCount: 2, RunsTotal: 3}); rc.has("kpi:"+tx.S("kpi.avg_compliance")) || rc.has("kpi:"+tx.S("kpi.critical_hosts")+"=0") {
+		t.Fatalf("compliance KPIs drawn without a compliance section:\n%s", strings.Join(rc.ops, "\n"))
+	}
+	if rc := ops(ExecutiveSummary{HostCount: 2, ComplianceIncluded: true, ScannedHosts: 1, AverageScore: 40.5, HostsCritical: 1}); !rc.has("kpi:" + tx.F("kpi.avg_compliance_scanned", 1, 2) + "=40.5%") {
+		t.Fatalf("partial coverage label missing:\n%s", strings.Join(rc.ops, "\n"))
+	}
+	if rc := ops(ExecutiveSummary{HostCount: 2, ComplianceIncluded: true}); !rc.has("nodata:"+tx.S("val.no_compliance_scans")) || rc.has("=0.0%") {
+		t.Fatalf("no scans must draw a note, not 0.0%%:\n%s", strings.Join(rc.ops, "\n"))
 	}
 }

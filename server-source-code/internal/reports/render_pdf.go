@@ -197,12 +197,18 @@ func pdfExecutiveSummary(c canvas, tx Texts, m *Model) {
 		return
 	}
 	c.heading(tx.S("sec.executive_summary"))
-	c.kpis([]kpiItem{
-		kpi(s.HostCount, tx.S("kpi.total_hosts"), pdfBlue),
-		{Value: pdfPct(s.AverageScore), Label: tx.S("kpi.avg_compliance"), Color: pdfScoreColor(s.AverageScore)},
-		kpi(s.HostsCritical, tx.S("kpi.critical_hosts"), pdfZeroGreen(s.HostsCritical)),
-		kpi(s.HostsCompliant, tx.S("kpi.compliant_hosts"), pdfGreen),
-	})
+	items := []kpiItem{kpi(s.HostCount, tx.S("kpi.total_hosts"), pdfBlue)}
+	if s.ComplianceIncluded && s.ScannedHosts > 0 {
+		items = append(items,
+			kpiItem{Value: pdfPct(s.AverageScore), Label: s.AvgComplianceLabel(tx), Color: pdfScoreColor(s.AverageScore)},
+			kpi(s.HostsCritical, tx.S("kpi.critical_hosts"), pdfZeroGreen(s.HostsCritical)),
+			kpi(s.HostsCompliant, tx.S("kpi.compliant_hosts"), pdfGreen),
+		)
+	}
+	c.kpis(items)
+	if s.ComplianceIncluded && s.ScannedHosts == 0 {
+		c.nodata(tx.S("val.no_compliance_scans"))
+	}
 	c.subheading(tx.S("sec.patching_overview") + " – " + tx.PeriodLabel(m.PeriodDays))
 	c.kpis([]kpiItem{
 		kpi(s.RunsTotal, tx.S("kpi.runs_total"), pdfIndigo),

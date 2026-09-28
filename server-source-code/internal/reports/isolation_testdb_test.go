@@ -389,3 +389,27 @@ func TestCollectPatchActivityTruncationKeepsExactCounters(t *testing.T) {
 		t.Fatalf("executive summary %+v", m.ExecutiveSummary)
 	}
 }
+
+// The compliance KPIs of the executive summary follow the "Compliance
+// summary" section: a report without that section carries no compliance
+// figures at all, so a customer who does not use the compliance module never
+// sees a hardening score in the summary.
+func TestCollectExecutiveComplianceFollowsComplianceSection(t *testing.T) {
+	d := newReportsTestDB(t)
+	f := buildFixture(t, d)
+
+	def := allSectionsDef(f.gA)
+	def.Sections = []string{SectionExecutiveSummary}
+	m := collectFor(t, d, f, def, true)
+	es := m.ExecutiveSummary
+	if es == nil || es.ComplianceIncluded || es.ScannedHosts != 0 || es.AverageScore != 0 || es.HostsCritical != 0 {
+		t.Fatalf("without compliance_summary the executive summary must carry no compliance figures: %+v", es)
+	}
+
+	def.Sections = []string{SectionExecutiveSummary, SectionComplianceSummary}
+	m = collectFor(t, d, f, def, true)
+	es = m.ExecutiveSummary
+	if es == nil || !es.ComplianceIncluded || es.ScannedHosts != 1 || es.AverageScore != 40 || es.HostsCritical != 1 {
+		t.Fatalf("with compliance_summary the figures are back: %+v", es)
+	}
+}

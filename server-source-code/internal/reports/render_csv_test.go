@@ -90,3 +90,15 @@ func TestResolveLocationFallsBackToUTC(t *testing.T) {
 		t.Fatalf("zurich: got %v %q", loc, name)
 	}
 }
+
+func TestRenderCSVExecutiveComplianceRowsOnlyWhenIncluded(t *testing.T) {
+	m := sampleModel("en", true)
+	m.ExecutiveSummary = &ExecutiveSummary{HostCount: 2, RunsTotal: 3}
+	out := RenderCSV(m)
+	if strings.Contains(out, "executive_summary,average_score") || strings.Contains(out, "executive_summary,scanned_hosts") {
+		t.Fatalf("compliance rows written without a compliance section:\n%s", out)
+	}
+	if !strings.Contains(out, "executive_summary,runs_total,3") {
+		t.Fatalf("patching rows missing:\n%s", out)
+	}
+}

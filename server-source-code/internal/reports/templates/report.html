@@ -32,10 +32,13 @@
 {{template "h2" (t $T "sec.executive_summary")}}
 <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;"><tr>
 {{template "kpi" (dict "Value" .HostCount "Label" (t $T "kpi.total_hosts") "Color" "#2563eb")}}
-{{template "kpi" (dict "Value" (pct .AverageScore) "Label" (t $T "kpi.avg_compliance") "Color" (scoreColor .AverageScore))}}
+{{- if and .ComplianceIncluded (gt .ScannedHosts 0)}}
+{{template "kpi" (dict "Value" (pct .AverageScore) "Label" (.AvgComplianceLabel $T) "Color" (scoreColor .AverageScore))}}
 {{template "kpi" (dict "Value" .HostsCritical "Label" (t $T "kpi.critical_hosts") "Color" (zeroGreen .HostsCritical))}}
 {{template "kpi" (dict "Value" .HostsCompliant "Label" (t $T "kpi.compliant_hosts") "Color" "#16a34a")}}
+{{- end}}
 </tr></table>
+{{if and .ComplianceIncluded (eq .ScannedHosts 0)}}{{template "nodata" (t $T "val.no_compliance_scans")}}{{end}}
 <h3 style="color:#0f172a;font-size:15px;font-weight:600;margin:16px 0 8px;">{{t $T "sec.patching_overview"}} – {{$T.PeriodLabel $.M.PeriodDays}}</h3>
 <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;"><tr>
 {{template "kpi" (dict "Value" .RunsTotal "Label" (t $T "kpi.runs_total") "Color" "#6366f1")}}

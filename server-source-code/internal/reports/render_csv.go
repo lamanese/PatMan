@@ -47,10 +47,12 @@ func RenderCSV(m *Model) string {
 		case SectionExecutiveSummary:
 			if s := m.ExecutiveSummary; s != nil {
 				row("executive_summary", "total_hosts", fmt.Sprintf("%d", s.HostCount))
-				row("executive_summary", "scanned_hosts", fmt.Sprintf("%d", s.ScannedHosts))
-				row("executive_summary", "average_score", fmt.Sprintf("%.1f", s.AverageScore))
-				row("executive_summary", "hosts_critical", fmt.Sprintf("%d", s.HostsCritical))
-				row("executive_summary", "hosts_compliant", fmt.Sprintf("%d", s.HostsCompliant))
+				if s.ComplianceIncluded {
+					row("executive_summary", "scanned_hosts", fmt.Sprintf("%d", s.ScannedHosts))
+					row("executive_summary", "average_score", fmt.Sprintf("%.1f", s.AverageScore))
+					row("executive_summary", "hosts_critical", fmt.Sprintf("%d", s.HostsCritical))
+					row("executive_summary", "hosts_compliant", fmt.Sprintf("%d", s.HostsCompliant))
+				}
 				row("executive_summary", "runs_total", fmt.Sprintf("%d", s.RunsTotal))
 				row("executive_summary", "runs_completed", fmt.Sprintf("%d", s.RunsCompleted))
 				row("executive_summary", "runs_failed", fmt.Sprintf("%d", s.RunsFailed))

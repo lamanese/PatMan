@@ -34,16 +34,20 @@ type Model struct {
 }
 
 // ExecutiveSummary combines compliance state and patching over the period.
+// The compliance figures are only collected when the report also selects
+// the compliance_summary section (ComplianceIncluded); a report without it
+// shows no hardening score at all.
 type ExecutiveSummary struct {
-	HostCount      int
-	ScannedHosts   int
-	AverageScore   float64
-	HostsCritical  int
-	HostsCompliant int
-	RunsTotal      int
-	RunsCompleted  int
-	RunsFailed     int
-	RunsRunning    int
+	HostCount          int
+	ComplianceIncluded bool
+	ScannedHosts       int
+	AverageScore       float64
+	HostsCritical      int
+	HostsCompliant     int
+	RunsTotal          int
+	RunsCompleted      int
+	RunsFailed         int
+	RunsRunning        int
 }
 
 // ComplianceRow is the latest completed scan of one host and profile.
@@ -231,4 +235,14 @@ type RebootRow struct {
 type RebootList struct {
 	Rows      []RebootRow
 	Truncated bool
+}
+
+// AvgComplianceLabel names the average-score KPI; when only part of the
+// scope was scanned the label says so, so the score is not read as a
+// fleet-wide figure.
+func (s *ExecutiveSummary) AvgComplianceLabel(tx Texts) string {
+	if s.ScannedHosts < s.HostCount {
+		return tx.F("kpi.avg_compliance_scanned", s.ScannedHosts, s.HostCount)
+	}
+	return tx.S("kpi.avg_compliance")
 }
