@@ -525,6 +525,10 @@ type PatchRun struct {
 	ValidationRunID   *string          `json:"validation_run_id"`
 	CreatedAt         pgtype.Timestamp `json:"created_at"`
 	UpdatedAt         pgtype.Timestamp `json:"updated_at"`
+	ForkSolvedAt      *time.Time       `json:"fork_solved_at"`
+	ForkSolvedBy      *string          `json:"fork_solved_by"`
+	ForkSolvedNote    *string          `json:"fork_solved_note"`
+	ForkSolvedByRunID *string          `json:"fork_solved_by_run_id"`
 }
 
 type PatchSchedule struct {

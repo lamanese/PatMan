@@ -1436,6 +1436,7 @@ The server moves a run through these statuses, visible as badges in the Runs & H
 | `completed` | The run finished successfully. The persisted `shell_output` is now authoritative. |
 | `dry_run_completed` | A dry-run finished successfully (terminal state for dry-runs that aren't turned into a real run). |
 | `failed` | The run finished with a non-zero exit status or the host reported an error. |
+| `solved` | A failed run an operator marked as solved (or that a later successful run on the same host solved automatically). It keeps its output, error and suggested fixes; it no longer counts as failed in the dashboard cards and reports. See [Solving failed runs](#solving-failed-runs). |
 | `cancelled` | The run was stopped by an operator (via **Stop Run**) or deleted before execution. |
 
 #### 2. Patch Policy
@@ -2070,7 +2071,7 @@ The runs list is sorted by `created_at` descending by default, with newest runs 
 
 Two filters are available above the table:
 
-- **Status**: `All`, `Active (queued + running)`, `Queued`, `Pending validation`, `Pending approval`, `Validated (awaiting approval)`, `Approved`, `Scheduled`, `Running`, `Completed`, `Failed`, `Cancelled`.
+- **Status**: `All`, `Active (queued + running)`, `Queued`, `Pending validation`, `Pending approval`, `Validated (awaiting approval)`, `Approved`, `Scheduled`, `Running`, `Completed`, `Failed`, `Solved`, `Cancelled`.
 - **Type**: `All`, `Patch all`, `Patch package`.
 
 Filters reset the pagination to page 1. Click **Clear filters** to remove both. The selected filters are also encoded in the URL, so you can bookmark or share a filtered view.
@@ -2091,9 +2092,20 @@ The rightmost **Actions** column shows action buttons specific to the row's curr
 | `pending_validation` | **Retry** (re-queue the dry-run), **Skip & Patch** (bypass validation and go straight to executing), **View** |
 | `pending_approval` | **Approve**, **View** |
 | `validated` | **Approve**, **View** |
+| `failed` | **Mark solved** (opens the note dialog), **View** |
 | All others | **View** only |
 
 **View** always opens the Run Detail page at `/patching/runs/{id}`.
+
+### Solving failed runs
+
+A failed run stays in the list as a reminder until someone deals with it. Once the cause is fixed on the host, mark the run as **solved**:
+
+- **Run Detail**: **Mark as solved** opens a dialog with an optional note (what fixed it). The page then shows a *Solved* box with who solved it, when, and the note (editable with **Edit note**), and a **Reopen** button that puts the run back to `failed`. The shell output, the error message and the suggested fixes with their copy buttons stay exactly as they were.
+- **Runs & History**: the **Mark solved** row action does the same for one row. For several rows, tick the checkbox in the second column of failed rows (or the header checkbox to select every failed run on the page) and use **Mark N as solved** in the bulk bar; the note applies to all of them.
+- **Automatically**: when a real (non-dry-run) run on a host completes, the server solves that host's older failed runs: a `patch_all` run solves all of them, a `patch_package` run only the failed runs with the same package selection. Such runs show *Solved automatically by a later successful run* with a link to that run. They can be reopened like any other solved run.
+
+Solved runs no longer count as failed: the dashboard cards, the run-outcomes chart and the scheduled reports show them as *Solved*. Every manual change is written to the audit log (`patch_run_solved`, `patch_run_reopened`, `patch_run_solved_note_updated`, `patch_runs_bulk_solved`). The endpoints (`POST /patching/runs/{id}/solve`, `POST /patching/runs/{id}/reopen`, `PATCH /patching/runs/{id}/solved-note`, `POST /patching/runs/bulk-solve`) require `can_manage_patching` like every other run action. Solved runs are terminal: they cannot be stopped, re-dispatched or deleted.
 
 **Approve** and **Skip & Patch** both route through the **Patch Wizard** in approve mode, even for a single row. This is a deliberate consistency choice: every path that turns a validation into a real run uses the same UI, so you get the per-host policy override UI for free (e.g. you can pick "Run immediately" at approval time even if the host normally has a delayed policy).
 

@@ -274,6 +274,8 @@ func (c *collector) executiveSummary() error {
 			es.RunsCompleted += n
 		case "failed":
 			es.RunsFailed += n
+		case "solved":
+			es.RunsSolved += n
 		case "running":
 			es.RunsRunning += n
 		}
@@ -546,6 +548,8 @@ func (c *collector) patchActivity() error {
 			pa.Completed += int(s.Cnt)
 		case "failed":
 			pa.Failed += int(s.Cnt)
+		case "solved":
+			pa.Solved += int(s.Cnt)
 		default:
 			pa.Other += int(s.Cnt)
 		}

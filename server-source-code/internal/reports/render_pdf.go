@@ -71,6 +71,7 @@ var (
 	pdfBlue   = hexRGB("#2563eb")
 	pdfIndigo = hexRGB("#6366f1")
 	pdfGreen  = hexRGB("#16a34a")
+	pdfTeal   = hexRGB("#0d9488")
 	pdfAmber  = hexRGB("#d97706")
 	pdfRed    = hexRGB("#dc2626")
 	pdfGrey   = hexRGB("#94a3b8")
@@ -465,6 +466,7 @@ func pdfPatchActivity(c canvas, tx Texts, m *Model) {
 	c.kpis([]kpiItem{
 		kpi(s.Completed, tx.S("kpi.runs_completed"), pdfGreen),
 		kpi(s.Failed, tx.S("kpi.runs_failed"), pdfZeroGreen(s.Failed)),
+		kpi(s.Solved, tx.S("kpi.runs_solved"), pdfTeal),
 	})
 	if len(s.Rows) == 0 {
 		c.nodata(tx.S("val.no_data"))

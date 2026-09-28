@@ -14,6 +14,7 @@ import (
 	"github.com/PatchMon/PatchMon/server-source-code/internal/alerts"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/config"
 	hostctx "github.com/PatchMon/PatchMon/server-source-code/internal/context"
+	"github.com/PatchMon/PatchMon/server-source-code/internal/database"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/db"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/middleware"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/notifications"
@@ -54,6 +55,8 @@ type PatchingHandler struct {
 	queueInspector *asynq.Inspector
 	notify         *notifications.Emitter
 	log            *slog.Logger
+	// db is used for audit entries of fork actions (solve/reopen); see SetDB.
+	db database.DBProvider
 
 	// Optional collaborators for live patch-run streaming.
 	// Populated via SetStreamDependencies after construction so existing
@@ -372,7 +375,7 @@ func (h *PatchingHandler) Dashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	statusCounts := map[string]int{
-		"queued": 0, "running": 0, "completed": 0, "failed": 0, "cancelled": 0,
+		"queued": 0, "running": 0, "completed": 0, "failed": 0, "cancelled": 0, "solved": 0,
 		"pending_validation": 0, "pending_approval": 0, "validated": 0,
 	}
 	for k, v := range byStatus {
@@ -384,6 +387,7 @@ func (h *PatchingHandler) Dashboard(w http.ResponseWriter, r *http.Request) {
 		"running":            statusCounts["running"],
 		"completed":          statusCounts["completed"],
 		"failed":             statusCounts["failed"],
+		"solved":             statusCounts["solved"],
 		"cancelled":          statusCounts["cancelled"],
 		"pending_validation": statusCounts["pending_validation"],
 		"pending_approval":   statusCounts["pending_approval"],
@@ -522,6 +526,11 @@ func (h *PatchingHandler) GetRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := patchRunToResponse(run)
+	if run.Status == "solved" {
+		if name, err := h.patchRuns.SolvedByUsername(r.Context(), id); err == nil {
+			resp["fork_solved_by_username"] = name
+		}
+	}
 	if host, err := h.hosts.GetByID(r.Context(), run.HostID); err == nil && host != nil {
 		if hosts, ok := resp["hosts"].(map[string]interface{}); ok {
 			hosts["awaiting_post_patch_report_run_id"] = host.AwaitingPostPatchReportRunID
@@ -1475,6 +1484,14 @@ func patchRunToResponse(r *db.GetPatchRunByIDRow) map[string]interface{} {
 		"validation_run_id":     r.ValidationRunID,
 		"policy_id":             r.PolicyID,
 		"policy_name":           r.PolicyName,
+		"fork_solved_by":        r.ForkSolvedBy,
+		"fork_solved_note":      r.ForkSolvedNote,
+		"fork_solved_by_run_id": r.ForkSolvedByRunID,
+	}
+	if r.ForkSolvedAt != nil {
+		m["fork_solved_at"] = r.ForkSolvedAt.UTC().Format(time.RFC3339)
+	} else {
+		m["fork_solved_at"] = nil
 	}
 	if len(r.PolicySnapshot) > 0 {
 		var snap map[string]interface{}

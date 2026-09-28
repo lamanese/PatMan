@@ -350,6 +350,10 @@ func (s *PatchRunsStore) UpdateOutput(ctx context.Context, id, osType, stage, ou
 			b, _ := json.Marshal(pkgs)
 			_ = d.Queries.UpdatePatchRunPackagesAffected(ctx, db.UpdatePatchRunPackagesAffectedParams{ID: id, PackagesAffected: b})
 		}
+		// Fork: a successful run solves the host's older failed runs. Best
+		// effort: the run is completed either way; an error here only
+		// leaves old failures open.
+		_, _ = d.Queries.ForkAutoSolvePatchRuns(ctx, id)
 		return nil
 	case "dry_run_completed":
 		pkgs := parsePackagesAffectedFromDryRunOutput(osType, output)

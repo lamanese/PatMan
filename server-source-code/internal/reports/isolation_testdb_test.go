@@ -413,3 +413,21 @@ func TestCollectExecutiveComplianceFollowsComplianceSection(t *testing.T) {
 		t.Fatalf("with compliance_summary the figures are back: %+v", es)
 	}
 }
+
+// Solved runs count as solved, not as failed, in the executive summary and
+// the patch activity section.
+func TestCollectSolvedRunsAreNotFailed(t *testing.T) {
+	d := newReportsTestDB(t)
+	f := buildFixture(t, d)
+	insertRun(t, d, f.a1, "solved", false, f.now.Add(-2*24*time.Hour), nil)
+	insertRun(t, d, f.a1, "failed", false, f.now.Add(-2*24*time.Hour), nil)
+	m := collectFor(t, d, f, allSectionsDef(f.gA), true)
+	es := m.ExecutiveSummary
+	if es.RunsFailed != 1 || es.RunsSolved != 1 {
+		t.Fatalf("executive summary failed=%d solved=%d, want 1/1: %+v", es.RunsFailed, es.RunsSolved, es)
+	}
+	pa := m.PatchActivity
+	if pa.Failed != 1 || pa.Solved != 1 || pa.Other != 0 {
+		t.Fatalf("patch activity failed=%d solved=%d other=%d, want 1/1/0", pa.Failed, pa.Solved, pa.Other)
+	}
+}

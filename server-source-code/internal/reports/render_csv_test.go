@@ -102,3 +102,15 @@ func TestRenderCSVExecutiveComplianceRowsOnlyWhenIncluded(t *testing.T) {
 		t.Fatalf("patching rows missing:\n%s", out)
 	}
 }
+
+func TestRenderCSVWritesSolvedCounters(t *testing.T) {
+	m := sampleModel("en", true)
+	m.PatchActivity.Solved = 2
+	m.ExecutiveSummary.RunsSolved = 2
+	out := RenderCSV(m)
+	for _, want := range []string{"patch_activity,solved,2", "executive_summary,runs_solved,2"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+}

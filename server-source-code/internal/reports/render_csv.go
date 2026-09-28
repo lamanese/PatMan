@@ -56,6 +56,7 @@ func RenderCSV(m *Model) string {
 				row("executive_summary", "runs_total", fmt.Sprintf("%d", s.RunsTotal))
 				row("executive_summary", "runs_completed", fmt.Sprintf("%d", s.RunsCompleted))
 				row("executive_summary", "runs_failed", fmt.Sprintf("%d", s.RunsFailed))
+				row("executive_summary", "runs_solved", fmt.Sprintf("%d", s.RunsSolved))
 				row("executive_summary", "runs_running", fmt.Sprintf("%d", s.RunsRunning))
 			}
 		case SectionComplianceSummary:
@@ -138,6 +139,7 @@ func RenderCSV(m *Model) string {
 			if s := m.PatchActivity; s != nil {
 				row("patch_activity", "completed", fmt.Sprintf("%d", s.Completed))
 				row("patch_activity", "failed", fmt.Sprintf("%d", s.Failed))
+				row("patch_activity", "solved", fmt.Sprintf("%d", s.Solved))
 				for _, r := range s.Rows {
 					kind := "run"
 					if r.DryRun {

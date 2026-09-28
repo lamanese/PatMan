@@ -738,6 +738,7 @@ var terminalPatchRunStatuses = map[string]bool{
 	"completed": true,
 	"failed":    true,
 	"cancelled": true,
+	"solved":    true, // fork: a failed run marked as solved
 }
 
 // dispatchablePatchRunStatuses are the only statuses a run_patch task may

@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
 	AlertTriangle,
+	CheckCheck,
 	CheckCircle,
 	CheckSquare,
 	ChevronDown,
@@ -34,6 +35,7 @@ import {
 import { CompactPackageSummary } from "../components/PackageListDisplay";
 import { PatchRunStatusBadge } from "../components/PatchRunStatusBadge";
 import PatchWizard from "../components/PatchWizard";
+import SolveRunDialog from "../components/patching/SolveRunDialog";
 import {
 	PatchingActivePolicies,
 	PatchingPendingApproval,
@@ -143,6 +145,11 @@ const Patching = () => {
 	});
 	const [retryingId, setRetryingId] = useState(null);
 	const [selectedRunIds, setSelectedRunIds] = useState(new Set());
+	// Fork: failed runs selected for "mark as solved"; solveDialog holds the
+	// ids the open dialog will solve (one row or the bulk selection).
+	const [selectedSolveIds, setSelectedSolveIds] = useState(new Set());
+	const [solveDialog, setSolveDialog] = useState(null);
+	const toast = useToast();
 	const [selectedApproveIds, setSelectedApproveIds] = useState(new Set());
 	const [bulkApproveResult, setBulkApproveResult] = useState(null);
 
@@ -181,6 +188,49 @@ const Patching = () => {
 	const allApprovableSelected =
 		approvableRuns.length > 0 &&
 		approvableRuns.every((r) => selectedApproveIds.has(r.id));
+
+	const solvableStatuses = new Set(["failed"]);
+	const solvableRuns = runs.filter((r) => solvableStatuses.has(r.status));
+	const allSolvableSelected =
+		solvableRuns.length > 0 &&
+		solvableRuns.every((r) => selectedSolveIds.has(r.id));
+	const bulkSolveMutation = useMutation({
+		mutationFn: ({ ids, note }) => patchingAPI.bulkSolveRuns(ids, note),
+		onSuccess: (data) => {
+			queryClient.invalidateQueries({ queryKey: ["patching-runs"] });
+			queryClient.invalidateQueries({ queryKey: ["patching-dashboard"] });
+			setSelectedSolveIds(new Set());
+			setSolveDialog(null);
+			const n = data?.solved?.length ?? 0;
+			toast.success(
+				`${n} run${n === 1 ? "" : "s"} marked as solved${
+					data?.skipped ? ` (${data.skipped} skipped)` : ""
+				}`,
+			);
+		},
+		onError: (err) =>
+			toast.error(
+				err?.response?.data?.error || "Could not mark runs as solved",
+			),
+	});
+	const handleToggleSolveSelect = (runId) => {
+		setSelectedSolveIds((prev) => {
+			const next = new Set(prev);
+			if (next.has(runId)) next.delete(runId);
+			else next.add(runId);
+			return next;
+		});
+	};
+	const handleToggleSolveSelectAll = () => {
+		setSelectedSolveIds(
+			allSolvableSelected ? new Set() : new Set(solvableRuns.map((r) => r.id)),
+		);
+	};
+	const handleSolveSelected = () => {
+		if (selectedSolveIds.size > 0)
+			setSolveDialog({ ids: [...selectedSolveIds] });
+	};
+	const handleSolveRun = (runId) => setSolveDialog({ ids: [runId] });
 
 	const deleteRunMutation = useMutation({
 		mutationFn: (runId) => patchingAPI.deleteRun(runId),
@@ -492,6 +542,15 @@ const Patching = () => {
 					setSelectedRunIds={setSelectedRunIds}
 					selectedApproveIds={selectedApproveIds}
 					setSelectedApproveIds={setSelectedApproveIds}
+					selectedSolveIds={selectedSolveIds}
+					setSelectedSolveIds={setSelectedSolveIds}
+					solvableStatuses={solvableStatuses}
+					solvableRuns={solvableRuns}
+					allSolvableSelected={allSolvableSelected}
+					handleToggleSolveSelect={handleToggleSolveSelect}
+					handleToggleSolveSelectAll={handleToggleSolveSelectAll}
+					handleSolveSelected={handleSolveSelected}
+					handleSolveRun={handleSolveRun}
 					deletableStatuses={deletableStatuses}
 					deletableRuns={deletableRuns}
 					allDeletableSelected={allDeletableSelected}
@@ -512,6 +571,26 @@ const Patching = () => {
 					bulkApproving={bulkApproving}
 					bulkApproveResult={bulkApproveResult}
 					setBulkApproveResult={setBulkApproveResult}
+				/>
+			)}
+			{solveDialog && (
+				<SolveRunDialog
+					open
+					title={
+						solveDialog.ids.length === 1
+							? "Mark as solved"
+							: `Mark ${solveDialog.ids.length} runs as solved`
+					}
+					description={
+						solveDialog.ids.length === 1
+							? "Marks this failed run as solved. It no longer counts as failed."
+							: "Marks the selected failed runs as solved with the same note. They no longer count as failed."
+					}
+					isPending={bulkSolveMutation.isPending}
+					onClose={() => setSolveDialog(null)}
+					onConfirm={(note) =>
+						bulkSolveMutation.mutate({ ids: solveDialog.ids, note })
+					}
 				/>
 			)}
 			{activeTab === "policies" &&
@@ -563,6 +642,7 @@ const STATUS_OPTIONS = [
 	{ value: "running", label: "Running" },
 	{ value: "completed", label: "Completed" },
 	{ value: "failed", label: "Failed" },
+	{ value: "solved", label: "Solved" },
 	{ value: "cancelled", label: "Cancelled" },
 ];
 
@@ -580,6 +660,7 @@ function RunRowActions({
 	run,
 	onApprove,
 	onRetry,
+	onSolve,
 	retryingId,
 	approvingId,
 	size = "sm",
@@ -636,6 +717,17 @@ function RunRowActions({
 						<PlayCircle className={iconSize} />
 					)}
 					Approve
+				</button>
+			)}
+			{run.status === "failed" && onSolve && (
+				<button
+					type="button"
+					onClick={() => onSolve(run.id)}
+					className={`${baseBtn} border border-teal-300 dark:border-teal-700 text-teal-700 dark:text-teal-200 hover:bg-teal-50 dark:hover:bg-teal-900/30`}
+					title="Mark this failed run as solved"
+				>
+					<CheckCheck className={iconSize} />
+					Mark solved
 				</button>
 			)}
 			{run.status === "validated" && (
@@ -697,6 +789,15 @@ function RunsTab({
 	handleApproveSelected,
 	handleApprove,
 	handleRetryValidation,
+	selectedSolveIds,
+	setSelectedSolveIds,
+	solvableStatuses,
+	solvableRuns,
+	allSolvableSelected,
+	handleToggleSolveSelect,
+	handleToggleSolveSelectAll,
+	handleSolveSelected,
+	handleSolveRun,
 	retryingId,
 	approvingId,
 	deletingIds,
@@ -709,7 +810,10 @@ function RunsTab({
 	const rangeStart = totalRuns === 0 ? 0 : (runsPage - 1) * runsLimit + 1;
 	const rangeEnd = Math.min(runsPage * runsLimit, totalRuns);
 	const hasFilters = Boolean(runsFilterStatus || runsFilterType);
-	const hasSelection = selectedRunIds.size > 0 || selectedApproveIds.size > 0;
+	const hasSelection =
+		selectedRunIds.size > 0 ||
+		selectedApproveIds.size > 0 ||
+		selectedSolveIds.size > 0;
 
 	return (
 		<div className="mt-4 space-y-4">
@@ -784,6 +888,40 @@ function RunsTab({
 									className="text-xs sm:text-sm text-secondary-500 hover:text-secondary-700 dark:text-white/70 dark:hover:text-white min-h-[44px] px-2"
 								>
 									<span className="hidden sm:inline">Clear approve</span>
+									<span className="sm:hidden">Clear</span>
+								</button>
+							</>
+						)}
+						{selectedSolveIds.size > 0 &&
+							(selectedRunIds.size > 0 || selectedApproveIds.size > 0) && (
+								<span
+									className="hidden sm:inline h-5 w-px bg-secondary-200 dark:bg-secondary-600"
+									aria-hidden="true"
+								/>
+							)}
+						{selectedSolveIds.size > 0 && (
+							<>
+								<span className="text-sm text-secondary-600 dark:text-white/80 flex-shrink-0">
+									{selectedSolveIds.size} failed run
+									{selectedSolveIds.size !== 1 ? "s" : ""} selected
+								</span>
+								<button
+									type="button"
+									onClick={handleSolveSelected}
+									className="btn-primary flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 min-h-[44px] text-xs sm:text-sm"
+								>
+									<CheckCheck className="h-4 w-4 flex-shrink-0" />
+									<span className="hidden sm:inline">
+										Mark {selectedSolveIds.size} as solved
+									</span>
+									<span className="sm:hidden">Solve</span>
+								</button>
+								<button
+									type="button"
+									onClick={() => setSelectedSolveIds(new Set())}
+									className="text-xs sm:text-sm text-secondary-500 hover:text-secondary-700 dark:text-white/70 dark:hover:text-white min-h-[44px] px-2"
+								>
+									<span className="hidden sm:inline">Clear solve</span>
 									<span className="sm:hidden">Clear</span>
 								</button>
 							</>
@@ -929,6 +1067,8 @@ function RunsTab({
 								const isApprovable = approvableStatuses.has(run.status);
 								const isSelectedForDelete = selectedRunIds.has(run.id);
 								const isSelectedForApprove = selectedApproveIds.has(run.id);
+								const isSolvable = solvableStatuses.has(run.status);
+								const isSelectedForSolve = selectedSolveIds.has(run.id);
 								const hasExtraDeps =
 									run.status === "validated" &&
 									run.packages_affected?.length >
@@ -989,6 +1129,21 @@ function RunsTab({
 														)}
 													</button>
 												)}
+												{isSolvable && (
+													<button
+														type="button"
+														onClick={() => handleToggleSolveSelect(run.id)}
+														className="min-w-[44px] min-h-[44px] flex items-center justify-center"
+														title="Select to mark as solved"
+														aria-label="Select to mark as solved"
+													>
+														{isSelectedForSolve ? (
+															<CheckSquare className="h-5 w-5 text-teal-600" />
+														) : (
+															<Square className="h-5 w-5 text-secondary-400" />
+														)}
+													</button>
+												)}
 											</div>
 										</div>
 
@@ -1040,6 +1195,7 @@ function RunsTab({
 												run={run}
 												onApprove={handleApprove}
 												onRetry={handleRetryValidation}
+												onSolve={handleSolveRun}
 												retryingId={retryingId}
 												approvingId={approvingId}
 												size="md"
@@ -1089,6 +1245,20 @@ function RunsTab({
 												>
 													{allApprovableSelected ? (
 														<CheckSquare className="h-4 w-4 text-primary-600" />
+													) : (
+														<Square className="h-4 w-4" />
+													)}
+												</button>
+											) : solvableRuns.length > 0 ? (
+												<button
+													type="button"
+													onClick={handleToggleSolveSelectAll}
+													className="flex items-center text-secondary-400 hover:text-secondary-600 dark:hover:text-secondary-200"
+													title="Select all failed runs to mark as solved"
+													aria-label="Select all failed runs to mark as solved"
+												>
+													{allSolvableSelected ? (
+														<CheckSquare className="h-4 w-4 text-teal-600" />
 													) : (
 														<Square className="h-4 w-4" />
 													)}
@@ -1145,8 +1315,12 @@ function RunsTab({
 										const isApprovable = approvableStatuses.has(run.status);
 										const isSelectedForDelete = selectedRunIds.has(run.id);
 										const isSelectedForApprove = selectedApproveIds.has(run.id);
+										const isSolvable = solvableStatuses.has(run.status);
+										const isSelectedForSolve = selectedSolveIds.has(run.id);
 										const isSelected =
-											isSelectedForDelete || isSelectedForApprove;
+											isSelectedForDelete ||
+											isSelectedForApprove ||
+											isSelectedForSolve;
 										const hasExtraDeps =
 											run.status === "validated" &&
 											run.packages_affected?.length >
@@ -1196,6 +1370,20 @@ function RunsTab({
 																<Square className="h-4 w-4" />
 															)}
 														</button>
+													) : isSolvable ? (
+														<button
+															type="button"
+															onClick={() => handleToggleSolveSelect(run.id)}
+															className="flex items-center text-secondary-400 hover:text-secondary-600 dark:hover:text-secondary-200"
+															title="Select to mark as solved"
+															aria-label="Select to mark as solved"
+														>
+															{isSelectedForSolve ? (
+																<CheckSquare className="h-4 w-4 text-teal-600" />
+															) : (
+																<Square className="h-4 w-4" />
+															)}
+														</button>
 													) : null}
 												</td>
 												<td className="px-3 sm:px-4 py-2 text-sm text-secondary-900 dark:text-white min-w-0">
@@ -1241,6 +1429,7 @@ function RunsTab({
 															run={run}
 															onApprove={handleApprove}
 															onRetry={handleRetryValidation}
+															onSolve={handleSolveRun}
 															retryingId={retryingId}
 															approvingId={approvingId}
 															size="sm"

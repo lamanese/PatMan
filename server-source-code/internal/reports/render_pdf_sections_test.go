@@ -162,7 +162,7 @@ func TestRenderSectionsCoversEverySectionInOrder(t *testing.T) {
 			k("passed_rules", "10#16a34a"), k("failed_rules", "15#dc2626"), k("critical_hosts", "1#dc2626"), k("unscanned", "1#94a3b8")},
 		{"h2:" + tx.S("sec.open_alerts"),
 			k("alerts_total", "1#6366f1"), k("alerts_critical", "1#dc2626"), k("alerts_error", "0#16a34a"), k("alerts_warning", "0#d97706")},
-		{"h2:" + tx.S("sec.patch_activity"), k("runs_completed", "0#16a34a"), k("runs_failed", "1#dc2626")},
+		{"h2:" + tx.S("sec.patch_activity"), k("runs_completed", "0#16a34a"), k("runs_failed", "1#dc2626"), k("runs_solved", "0#0d9488")},
 	}
 	for _, g := range kpiGroups {
 		if !rc.hasSeq(g) {

@@ -7,6 +7,7 @@ package db
 
 import (
 	"context"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -245,6 +246,78 @@ func (q *Queries) ExistsPatchPolicyExclusion(ctx context.Context, arg ExistsPatc
 	return exists, err
 }
 
+const forkAutoSolvePatchRuns = `-- name: ForkAutoSolvePatchRuns :many
+UPDATE patch_runs f
+SET status = 'solved', fork_solved_at = NOW(), fork_solved_by = NULL, fork_solved_by_run_id = c.id,
+    fork_solved_note = 'Solved automatically: a later run on this host completed.', updated_at = NOW()
+FROM patch_runs c
+WHERE c.id = $1 AND c.status = 'completed' AND c.dry_run = false
+  AND f.host_id = c.host_id AND f.status = 'failed' AND f.created_at < c.created_at
+  AND (c.patch_type = 'patch_all'
+       OR (f.patch_type = c.patch_type
+           AND f.package_name IS NOT DISTINCT FROM c.package_name
+           AND COALESCE(f.package_names, 'null'::jsonb) = COALESCE(c.package_names, 'null'::jsonb)))
+RETURNING f.id
+`
+
+// Fork: a completed real run solves the older failed runs of its host:
+// patch_all solves every failed run, patch_package only failed runs with the
+// same package selection. Returns the ids that were solved.
+func (q *Queries) ForkAutoSolvePatchRuns(ctx context.Context, completedRunID string) ([]string, error) {
+	rows, err := q.db.Query(ctx, forkAutoSolvePatchRuns, completedRunID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const forkBulkSolvePatchRuns = `-- name: ForkBulkSolvePatchRuns :many
+UPDATE patch_runs
+SET status = 'solved', fork_solved_at = NOW(), fork_solved_by = $1, fork_solved_note = $2,
+    fork_solved_by_run_id = NULL, updated_at = NOW()
+WHERE id = ANY($3::text[]) AND status = 'failed'
+RETURNING id
+`
+
+type ForkBulkSolvePatchRunsParams struct {
+	UserID *string  `json:"user_id"`
+	Note   *string  `json:"note"`
+	Ids    []string `json:"ids"`
+}
+
+// Fork: same as ForkSolvePatchRun for a list of ids; returns the ids that changed.
+func (q *Queries) ForkBulkSolvePatchRuns(ctx context.Context, arg ForkBulkSolvePatchRunsParams) ([]string, error) {
+	rows, err := q.db.Query(ctx, forkBulkSolvePatchRuns, arg.UserID, arg.Note, arg.Ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const forkCancelStaleRunningPatchRuns = `-- name: ForkCancelStaleRunningPatchRuns :execrows
 
 UPDATE patch_runs
@@ -298,6 +371,73 @@ type ForkCancelStaleWaitingPatchRunsParams struct {
 // run before its own scheduled_at plus the caller's threshold has elapsed.
 func (q *Queries) ForkCancelStaleWaitingPatchRuns(ctx context.Context, arg ForkCancelStaleWaitingPatchRunsParams) (int64, error) {
 	result, err := q.db.Exec(ctx, forkCancelStaleWaitingPatchRuns, arg.ErrorMessage, arg.Statuses, arg.Threshold)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const forkGetPatchRunSolvedByUsername = `-- name: ForkGetPatchRunSolvedByUsername :one
+SELECT u.username FROM patch_runs pr LEFT JOIN users u ON u.id = pr.fork_solved_by WHERE pr.id = $1
+`
+
+// Fork: who solved the run (NULL for automatic or deleted users).
+func (q *Queries) ForkGetPatchRunSolvedByUsername(ctx context.Context, id string) (*string, error) {
+	row := q.db.QueryRow(ctx, forkGetPatchRunSolvedByUsername, id)
+	var username *string
+	err := row.Scan(&username)
+	return username, err
+}
+
+const forkReopenPatchRun = `-- name: ForkReopenPatchRun :execrows
+UPDATE patch_runs
+SET status = 'failed', fork_solved_at = NULL, fork_solved_by = NULL, fork_solved_by_run_id = NULL, updated_at = NOW()
+WHERE id = $1 AND status = 'solved'
+`
+
+// Fork: back to failed; the note is kept as history.
+func (q *Queries) ForkReopenPatchRun(ctx context.Context, id string) (int64, error) {
+	result, err := q.db.Exec(ctx, forkReopenPatchRun, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const forkSolvePatchRun = `-- name: ForkSolvePatchRun :execrows
+UPDATE patch_runs
+SET status = 'solved', fork_solved_at = NOW(), fork_solved_by = $1, fork_solved_note = $2,
+    fork_solved_by_run_id = NULL, updated_at = NOW()
+WHERE id = $3 AND status = 'failed'
+`
+
+type ForkSolvePatchRunParams struct {
+	UserID *string `json:"user_id"`
+	Note   *string `json:"note"`
+	ID     string  `json:"id"`
+}
+
+// Fork: an operator marks a failed run as solved; output and error stay.
+func (q *Queries) ForkSolvePatchRun(ctx context.Context, arg ForkSolvePatchRunParams) (int64, error) {
+	result, err := q.db.Exec(ctx, forkSolvePatchRun, arg.UserID, arg.Note, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const forkUpdatePatchRunSolvedNote = `-- name: ForkUpdatePatchRunSolvedNote :execrows
+UPDATE patch_runs SET fork_solved_note = $1, updated_at = NOW()
+WHERE id = $2 AND status = 'solved'
+`
+
+type ForkUpdatePatchRunSolvedNoteParams struct {
+	Note *string `json:"note"`
+	ID   string  `json:"id"`
+}
+
+func (q *Queries) ForkUpdatePatchRunSolvedNote(ctx context.Context, arg ForkUpdatePatchRunSolvedNoteParams) (int64, error) {
+	result, err := q.db.Exec(ctx, forkUpdatePatchRunSolvedNote, arg.Note, arg.ID)
 	if err != nil {
 		return 0, err
 	}
@@ -419,7 +559,7 @@ func (q *Queries) GetPatchPolicyByID(ctx context.Context, id string) (PatchPolic
 }
 
 const getPatchRunByID = `-- name: GetPatchRunByID :one
-SELECT pr.id, pr.host_id, pr.job_id, pr.patch_type, pr.package_name, pr.package_names, pr.status, pr.shell_output, pr.error_message, pr.started_at, pr.completed_at, pr.scheduled_at, pr.triggered_by_user_id, pr.approved_by_user_id, pr.dry_run, pr.packages_affected, pr.policy_id, pr.policy_name, pr.policy_snapshot, pr.validation_run_id, pr.created_at, pr.updated_at, h.friendly_name AS host_friendly_name, h.hostname AS host_hostname, u.username AS triggered_by_username, au.username AS approved_by_username
+SELECT pr.id, pr.host_id, pr.job_id, pr.patch_type, pr.package_name, pr.package_names, pr.status, pr.shell_output, pr.error_message, pr.started_at, pr.completed_at, pr.scheduled_at, pr.triggered_by_user_id, pr.approved_by_user_id, pr.dry_run, pr.packages_affected, pr.policy_id, pr.policy_name, pr.policy_snapshot, pr.validation_run_id, pr.created_at, pr.updated_at, pr.fork_solved_at, pr.fork_solved_by, pr.fork_solved_note, pr.fork_solved_by_run_id, h.friendly_name AS host_friendly_name, h.hostname AS host_hostname, u.username AS triggered_by_username, au.username AS approved_by_username
 FROM patch_runs pr
 LEFT JOIN hosts h ON pr.host_id = h.id
 LEFT JOIN users u ON pr.triggered_by_user_id = u.id
@@ -450,6 +590,10 @@ type GetPatchRunByIDRow struct {
 	ValidationRunID     *string          `json:"validation_run_id"`
 	CreatedAt           pgtype.Timestamp `json:"created_at"`
 	UpdatedAt           pgtype.Timestamp `json:"updated_at"`
+	ForkSolvedAt        *time.Time       `json:"fork_solved_at"`
+	ForkSolvedBy        *string          `json:"fork_solved_by"`
+	ForkSolvedNote      *string          `json:"fork_solved_note"`
+	ForkSolvedByRunID   *string          `json:"fork_solved_by_run_id"`
 	HostFriendlyName    *string          `json:"host_friendly_name"`
 	HostHostname        *string          `json:"host_hostname"`
 	TriggeredByUsername *string          `json:"triggered_by_username"`
@@ -482,6 +626,10 @@ func (q *Queries) GetPatchRunByID(ctx context.Context, id string) (GetPatchRunBy
 		&i.ValidationRunID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ForkSolvedAt,
+		&i.ForkSolvedBy,
+		&i.ForkSolvedNote,
+		&i.ForkSolvedByRunID,
 		&i.HostFriendlyName,
 		&i.HostHostname,
 		&i.TriggeredByUsername,
@@ -491,7 +639,7 @@ func (q *Queries) GetPatchRunByID(ctx context.Context, id string) (GetPatchRunBy
 }
 
 const getPatchRunByIDSimple = `-- name: GetPatchRunByIDSimple :one
-SELECT id, host_id, job_id, patch_type, package_name, package_names, status, shell_output, error_message, started_at, completed_at, scheduled_at, triggered_by_user_id, approved_by_user_id, dry_run, packages_affected, policy_id, policy_name, policy_snapshot, validation_run_id, created_at, updated_at FROM patch_runs WHERE id = $1
+SELECT id, host_id, job_id, patch_type, package_name, package_names, status, shell_output, error_message, started_at, completed_at, scheduled_at, triggered_by_user_id, approved_by_user_id, dry_run, packages_affected, policy_id, policy_name, policy_snapshot, validation_run_id, created_at, updated_at, fork_solved_at, fork_solved_by, fork_solved_note, fork_solved_by_run_id FROM patch_runs WHERE id = $1
 `
 
 func (q *Queries) GetPatchRunByIDSimple(ctx context.Context, id string) (PatchRun, error) {
@@ -520,12 +668,16 @@ func (q *Queries) GetPatchRunByIDSimple(ctx context.Context, id string) (PatchRu
 		&i.ValidationRunID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ForkSolvedAt,
+		&i.ForkSolvedBy,
+		&i.ForkSolvedNote,
+		&i.ForkSolvedByRunID,
 	)
 	return i, err
 }
 
 const listActivePatchRuns = `-- name: ListActivePatchRuns :many
-SELECT pr.id, pr.host_id, pr.job_id, pr.patch_type, pr.package_name, pr.package_names, pr.status, pr.shell_output, pr.error_message, pr.started_at, pr.completed_at, pr.scheduled_at, pr.triggered_by_user_id, pr.approved_by_user_id, pr.dry_run, pr.packages_affected, pr.policy_id, pr.policy_name, pr.policy_snapshot, pr.validation_run_id, pr.created_at, pr.updated_at, h.friendly_name AS host_friendly_name, h.hostname AS host_hostname, u.username AS triggered_by_username
+SELECT pr.id, pr.host_id, pr.job_id, pr.patch_type, pr.package_name, pr.package_names, pr.status, pr.shell_output, pr.error_message, pr.started_at, pr.completed_at, pr.scheduled_at, pr.triggered_by_user_id, pr.approved_by_user_id, pr.dry_run, pr.packages_affected, pr.policy_id, pr.policy_name, pr.policy_snapshot, pr.validation_run_id, pr.created_at, pr.updated_at, pr.fork_solved_at, pr.fork_solved_by, pr.fork_solved_note, pr.fork_solved_by_run_id, h.friendly_name AS host_friendly_name, h.hostname AS host_hostname, u.username AS triggered_by_username
 FROM patch_runs pr
 LEFT JOIN hosts h ON pr.host_id = h.id
 LEFT JOIN users u ON pr.triggered_by_user_id = u.id
@@ -556,6 +708,10 @@ type ListActivePatchRunsRow struct {
 	ValidationRunID     *string          `json:"validation_run_id"`
 	CreatedAt           pgtype.Timestamp `json:"created_at"`
 	UpdatedAt           pgtype.Timestamp `json:"updated_at"`
+	ForkSolvedAt        *time.Time       `json:"fork_solved_at"`
+	ForkSolvedBy        *string          `json:"fork_solved_by"`
+	ForkSolvedNote      *string          `json:"fork_solved_note"`
+	ForkSolvedByRunID   *string          `json:"fork_solved_by_run_id"`
 	HostFriendlyName    *string          `json:"host_friendly_name"`
 	HostHostname        *string          `json:"host_hostname"`
 	TriggeredByUsername *string          `json:"triggered_by_username"`
@@ -593,6 +749,10 @@ func (q *Queries) ListActivePatchRuns(ctx context.Context) ([]ListActivePatchRun
 			&i.ValidationRunID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ForkSolvedAt,
+			&i.ForkSolvedBy,
+			&i.ForkSolvedNote,
+			&i.ForkSolvedByRunID,
 			&i.HostFriendlyName,
 			&i.HostHostname,
 			&i.TriggeredByUsername,
@@ -757,7 +917,7 @@ func (q *Queries) ListPatchPolicyExclusions(ctx context.Context, patchPolicyID s
 }
 
 const listPatchRuns = `-- name: ListPatchRuns :many
-SELECT pr.id, pr.host_id, pr.job_id, pr.patch_type, pr.package_name, pr.package_names, pr.status, pr.shell_output, pr.error_message, pr.started_at, pr.completed_at, pr.scheduled_at, pr.triggered_by_user_id, pr.approved_by_user_id, pr.dry_run, pr.packages_affected, pr.policy_id, pr.policy_name, pr.policy_snapshot, pr.validation_run_id, pr.created_at, pr.updated_at, h.friendly_name AS host_friendly_name, h.hostname AS host_hostname, u.username AS triggered_by_username
+SELECT pr.id, pr.host_id, pr.job_id, pr.patch_type, pr.package_name, pr.package_names, pr.status, pr.shell_output, pr.error_message, pr.started_at, pr.completed_at, pr.scheduled_at, pr.triggered_by_user_id, pr.approved_by_user_id, pr.dry_run, pr.packages_affected, pr.policy_id, pr.policy_name, pr.policy_snapshot, pr.validation_run_id, pr.created_at, pr.updated_at, pr.fork_solved_at, pr.fork_solved_by, pr.fork_solved_note, pr.fork_solved_by_run_id, h.friendly_name AS host_friendly_name, h.hostname AS host_hostname, u.username AS triggered_by_username
 FROM patch_runs pr
 LEFT JOIN hosts h ON pr.host_id = h.id
 LEFT JOIN users u ON pr.triggered_by_user_id = u.id
@@ -803,6 +963,10 @@ type ListPatchRunsRow struct {
 	ValidationRunID     *string          `json:"validation_run_id"`
 	CreatedAt           pgtype.Timestamp `json:"created_at"`
 	UpdatedAt           pgtype.Timestamp `json:"updated_at"`
+	ForkSolvedAt        *time.Time       `json:"fork_solved_at"`
+	ForkSolvedBy        *string          `json:"fork_solved_by"`
+	ForkSolvedNote      *string          `json:"fork_solved_note"`
+	ForkSolvedByRunID   *string          `json:"fork_solved_by_run_id"`
 	HostFriendlyName    *string          `json:"host_friendly_name"`
 	HostHostname        *string          `json:"host_hostname"`
 	TriggeredByUsername *string          `json:"triggered_by_username"`
@@ -849,6 +1013,10 @@ func (q *Queries) ListPatchRuns(ctx context.Context, arg ListPatchRunsParams) ([
 			&i.ValidationRunID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ForkSolvedAt,
+			&i.ForkSolvedBy,
+			&i.ForkSolvedNote,
+			&i.ForkSolvedByRunID,
 			&i.HostFriendlyName,
 			&i.HostHostname,
 			&i.TriggeredByUsername,
@@ -948,7 +1116,7 @@ func (q *Queries) ListPatchRunsByStatus(ctx context.Context) ([]ListPatchRunsByS
 }
 
 const listPatchRunsOrderByCompletedAt = `-- name: ListPatchRunsOrderByCompletedAt :many
-SELECT pr.id, pr.host_id, pr.job_id, pr.patch_type, pr.package_name, pr.package_names, pr.status, pr.shell_output, pr.error_message, pr.started_at, pr.completed_at, pr.scheduled_at, pr.triggered_by_user_id, pr.approved_by_user_id, pr.dry_run, pr.packages_affected, pr.policy_id, pr.policy_name, pr.policy_snapshot, pr.validation_run_id, pr.created_at, pr.updated_at, h.friendly_name AS host_friendly_name, h.hostname AS host_hostname, u.username AS triggered_by_username
+SELECT pr.id, pr.host_id, pr.job_id, pr.patch_type, pr.package_name, pr.package_names, pr.status, pr.shell_output, pr.error_message, pr.started_at, pr.completed_at, pr.scheduled_at, pr.triggered_by_user_id, pr.approved_by_user_id, pr.dry_run, pr.packages_affected, pr.policy_id, pr.policy_name, pr.policy_snapshot, pr.validation_run_id, pr.created_at, pr.updated_at, pr.fork_solved_at, pr.fork_solved_by, pr.fork_solved_note, pr.fork_solved_by_run_id, h.friendly_name AS host_friendly_name, h.hostname AS host_hostname, u.username AS triggered_by_username
 FROM patch_runs pr
 LEFT JOIN hosts h ON pr.host_id = h.id
 LEFT JOIN users u ON pr.triggered_by_user_id = u.id
@@ -994,6 +1162,10 @@ type ListPatchRunsOrderByCompletedAtRow struct {
 	ValidationRunID     *string          `json:"validation_run_id"`
 	CreatedAt           pgtype.Timestamp `json:"created_at"`
 	UpdatedAt           pgtype.Timestamp `json:"updated_at"`
+	ForkSolvedAt        *time.Time       `json:"fork_solved_at"`
+	ForkSolvedBy        *string          `json:"fork_solved_by"`
+	ForkSolvedNote      *string          `json:"fork_solved_note"`
+	ForkSolvedByRunID   *string          `json:"fork_solved_by_run_id"`
 	HostFriendlyName    *string          `json:"host_friendly_name"`
 	HostHostname        *string          `json:"host_hostname"`
 	TriggeredByUsername *string          `json:"triggered_by_username"`
@@ -1037,6 +1209,10 @@ func (q *Queries) ListPatchRunsOrderByCompletedAt(ctx context.Context, arg ListP
 			&i.ValidationRunID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ForkSolvedAt,
+			&i.ForkSolvedBy,
+			&i.ForkSolvedNote,
+			&i.ForkSolvedByRunID,
 			&i.HostFriendlyName,
 			&i.HostHostname,
 			&i.TriggeredByUsername,
@@ -1052,7 +1228,7 @@ func (q *Queries) ListPatchRunsOrderByCompletedAt(ctx context.Context, arg ListP
 }
 
 const listPatchRunsOrderByCompletedAtAsc = `-- name: ListPatchRunsOrderByCompletedAtAsc :many
-SELECT pr.id, pr.host_id, pr.job_id, pr.patch_type, pr.package_name, pr.package_names, pr.status, pr.shell_output, pr.error_message, pr.started_at, pr.completed_at, pr.scheduled_at, pr.triggered_by_user_id, pr.approved_by_user_id, pr.dry_run, pr.packages_affected, pr.policy_id, pr.policy_name, pr.policy_snapshot, pr.validation_run_id, pr.created_at, pr.updated_at, h.friendly_name AS host_friendly_name, h.hostname AS host_hostname, u.username AS triggered_by_username
+SELECT pr.id, pr.host_id, pr.job_id, pr.patch_type, pr.package_name, pr.package_names, pr.status, pr.shell_output, pr.error_message, pr.started_at, pr.completed_at, pr.scheduled_at, pr.triggered_by_user_id, pr.approved_by_user_id, pr.dry_run, pr.packages_affected, pr.policy_id, pr.policy_name, pr.policy_snapshot, pr.validation_run_id, pr.created_at, pr.updated_at, pr.fork_solved_at, pr.fork_solved_by, pr.fork_solved_note, pr.fork_solved_by_run_id, h.friendly_name AS host_friendly_name, h.hostname AS host_hostname, u.username AS triggered_by_username
 FROM patch_runs pr
 LEFT JOIN hosts h ON pr.host_id = h.id
 LEFT JOIN users u ON pr.triggered_by_user_id = u.id
@@ -1098,6 +1274,10 @@ type ListPatchRunsOrderByCompletedAtAscRow struct {
 	ValidationRunID     *string          `json:"validation_run_id"`
 	CreatedAt           pgtype.Timestamp `json:"created_at"`
 	UpdatedAt           pgtype.Timestamp `json:"updated_at"`
+	ForkSolvedAt        *time.Time       `json:"fork_solved_at"`
+	ForkSolvedBy        *string          `json:"fork_solved_by"`
+	ForkSolvedNote      *string          `json:"fork_solved_note"`
+	ForkSolvedByRunID   *string          `json:"fork_solved_by_run_id"`
 	HostFriendlyName    *string          `json:"host_friendly_name"`
 	HostHostname        *string          `json:"host_hostname"`
 	TriggeredByUsername *string          `json:"triggered_by_username"`
@@ -1141,6 +1321,10 @@ func (q *Queries) ListPatchRunsOrderByCompletedAtAsc(ctx context.Context, arg Li
 			&i.ValidationRunID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ForkSolvedAt,
+			&i.ForkSolvedBy,
+			&i.ForkSolvedNote,
+			&i.ForkSolvedByRunID,
 			&i.HostFriendlyName,
 			&i.HostHostname,
 			&i.TriggeredByUsername,
@@ -1156,7 +1340,7 @@ func (q *Queries) ListPatchRunsOrderByCompletedAtAsc(ctx context.Context, arg Li
 }
 
 const listPatchRunsOrderByCreatedAtAsc = `-- name: ListPatchRunsOrderByCreatedAtAsc :many
-SELECT pr.id, pr.host_id, pr.job_id, pr.patch_type, pr.package_name, pr.package_names, pr.status, pr.shell_output, pr.error_message, pr.started_at, pr.completed_at, pr.scheduled_at, pr.triggered_by_user_id, pr.approved_by_user_id, pr.dry_run, pr.packages_affected, pr.policy_id, pr.policy_name, pr.policy_snapshot, pr.validation_run_id, pr.created_at, pr.updated_at, h.friendly_name AS host_friendly_name, h.hostname AS host_hostname, u.username AS triggered_by_username
+SELECT pr.id, pr.host_id, pr.job_id, pr.patch_type, pr.package_name, pr.package_names, pr.status, pr.shell_output, pr.error_message, pr.started_at, pr.completed_at, pr.scheduled_at, pr.triggered_by_user_id, pr.approved_by_user_id, pr.dry_run, pr.packages_affected, pr.policy_id, pr.policy_name, pr.policy_snapshot, pr.validation_run_id, pr.created_at, pr.updated_at, pr.fork_solved_at, pr.fork_solved_by, pr.fork_solved_note, pr.fork_solved_by_run_id, h.friendly_name AS host_friendly_name, h.hostname AS host_hostname, u.username AS triggered_by_username
 FROM patch_runs pr
 LEFT JOIN hosts h ON pr.host_id = h.id
 LEFT JOIN users u ON pr.triggered_by_user_id = u.id
@@ -1202,6 +1386,10 @@ type ListPatchRunsOrderByCreatedAtAscRow struct {
 	ValidationRunID     *string          `json:"validation_run_id"`
 	CreatedAt           pgtype.Timestamp `json:"created_at"`
 	UpdatedAt           pgtype.Timestamp `json:"updated_at"`
+	ForkSolvedAt        *time.Time       `json:"fork_solved_at"`
+	ForkSolvedBy        *string          `json:"fork_solved_by"`
+	ForkSolvedNote      *string          `json:"fork_solved_note"`
+	ForkSolvedByRunID   *string          `json:"fork_solved_by_run_id"`
 	HostFriendlyName    *string          `json:"host_friendly_name"`
 	HostHostname        *string          `json:"host_hostname"`
 	TriggeredByUsername *string          `json:"triggered_by_username"`
@@ -1245,6 +1433,10 @@ func (q *Queries) ListPatchRunsOrderByCreatedAtAsc(ctx context.Context, arg List
 			&i.ValidationRunID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ForkSolvedAt,
+			&i.ForkSolvedBy,
+			&i.ForkSolvedNote,
+			&i.ForkSolvedByRunID,
 			&i.HostFriendlyName,
 			&i.HostHostname,
 			&i.TriggeredByUsername,
@@ -1260,7 +1452,7 @@ func (q *Queries) ListPatchRunsOrderByCreatedAtAsc(ctx context.Context, arg List
 }
 
 const listPatchRunsOrderByStartedAt = `-- name: ListPatchRunsOrderByStartedAt :many
-SELECT pr.id, pr.host_id, pr.job_id, pr.patch_type, pr.package_name, pr.package_names, pr.status, pr.shell_output, pr.error_message, pr.started_at, pr.completed_at, pr.scheduled_at, pr.triggered_by_user_id, pr.approved_by_user_id, pr.dry_run, pr.packages_affected, pr.policy_id, pr.policy_name, pr.policy_snapshot, pr.validation_run_id, pr.created_at, pr.updated_at, h.friendly_name AS host_friendly_name, h.hostname AS host_hostname, u.username AS triggered_by_username
+SELECT pr.id, pr.host_id, pr.job_id, pr.patch_type, pr.package_name, pr.package_names, pr.status, pr.shell_output, pr.error_message, pr.started_at, pr.completed_at, pr.scheduled_at, pr.triggered_by_user_id, pr.approved_by_user_id, pr.dry_run, pr.packages_affected, pr.policy_id, pr.policy_name, pr.policy_snapshot, pr.validation_run_id, pr.created_at, pr.updated_at, pr.fork_solved_at, pr.fork_solved_by, pr.fork_solved_note, pr.fork_solved_by_run_id, h.friendly_name AS host_friendly_name, h.hostname AS host_hostname, u.username AS triggered_by_username
 FROM patch_runs pr
 LEFT JOIN hosts h ON pr.host_id = h.id
 LEFT JOIN users u ON pr.triggered_by_user_id = u.id
@@ -1306,6 +1498,10 @@ type ListPatchRunsOrderByStartedAtRow struct {
 	ValidationRunID     *string          `json:"validation_run_id"`
 	CreatedAt           pgtype.Timestamp `json:"created_at"`
 	UpdatedAt           pgtype.Timestamp `json:"updated_at"`
+	ForkSolvedAt        *time.Time       `json:"fork_solved_at"`
+	ForkSolvedBy        *string          `json:"fork_solved_by"`
+	ForkSolvedNote      *string          `json:"fork_solved_note"`
+	ForkSolvedByRunID   *string          `json:"fork_solved_by_run_id"`
 	HostFriendlyName    *string          `json:"host_friendly_name"`
 	HostHostname        *string          `json:"host_hostname"`
 	TriggeredByUsername *string          `json:"triggered_by_username"`
@@ -1349,6 +1545,10 @@ func (q *Queries) ListPatchRunsOrderByStartedAt(ctx context.Context, arg ListPat
 			&i.ValidationRunID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ForkSolvedAt,
+			&i.ForkSolvedBy,
+			&i.ForkSolvedNote,
+			&i.ForkSolvedByRunID,
 			&i.HostFriendlyName,
 			&i.HostHostname,
 			&i.TriggeredByUsername,
@@ -1364,7 +1564,7 @@ func (q *Queries) ListPatchRunsOrderByStartedAt(ctx context.Context, arg ListPat
 }
 
 const listPatchRunsOrderByStartedAtAsc = `-- name: ListPatchRunsOrderByStartedAtAsc :many
-SELECT pr.id, pr.host_id, pr.job_id, pr.patch_type, pr.package_name, pr.package_names, pr.status, pr.shell_output, pr.error_message, pr.started_at, pr.completed_at, pr.scheduled_at, pr.triggered_by_user_id, pr.approved_by_user_id, pr.dry_run, pr.packages_affected, pr.policy_id, pr.policy_name, pr.policy_snapshot, pr.validation_run_id, pr.created_at, pr.updated_at, h.friendly_name AS host_friendly_name, h.hostname AS host_hostname, u.username AS triggered_by_username
+SELECT pr.id, pr.host_id, pr.job_id, pr.patch_type, pr.package_name, pr.package_names, pr.status, pr.shell_output, pr.error_message, pr.started_at, pr.completed_at, pr.scheduled_at, pr.triggered_by_user_id, pr.approved_by_user_id, pr.dry_run, pr.packages_affected, pr.policy_id, pr.policy_name, pr.policy_snapshot, pr.validation_run_id, pr.created_at, pr.updated_at, pr.fork_solved_at, pr.fork_solved_by, pr.fork_solved_note, pr.fork_solved_by_run_id, h.friendly_name AS host_friendly_name, h.hostname AS host_hostname, u.username AS triggered_by_username
 FROM patch_runs pr
 LEFT JOIN hosts h ON pr.host_id = h.id
 LEFT JOIN users u ON pr.triggered_by_user_id = u.id
@@ -1410,6 +1610,10 @@ type ListPatchRunsOrderByStartedAtAscRow struct {
 	ValidationRunID     *string          `json:"validation_run_id"`
 	CreatedAt           pgtype.Timestamp `json:"created_at"`
 	UpdatedAt           pgtype.Timestamp `json:"updated_at"`
+	ForkSolvedAt        *time.Time       `json:"fork_solved_at"`
+	ForkSolvedBy        *string          `json:"fork_solved_by"`
+	ForkSolvedNote      *string          `json:"fork_solved_note"`
+	ForkSolvedByRunID   *string          `json:"fork_solved_by_run_id"`
 	HostFriendlyName    *string          `json:"host_friendly_name"`
 	HostHostname        *string          `json:"host_hostname"`
 	TriggeredByUsername *string          `json:"triggered_by_username"`
@@ -1453,6 +1657,10 @@ func (q *Queries) ListPatchRunsOrderByStartedAtAsc(ctx context.Context, arg List
 			&i.ValidationRunID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ForkSolvedAt,
+			&i.ForkSolvedBy,
+			&i.ForkSolvedNote,
+			&i.ForkSolvedByRunID,
 			&i.HostFriendlyName,
 			&i.HostHostname,
 			&i.TriggeredByUsername,
@@ -1468,7 +1676,7 @@ func (q *Queries) ListPatchRunsOrderByStartedAtAsc(ctx context.Context, arg List
 }
 
 const listPatchRunsOrderByStatus = `-- name: ListPatchRunsOrderByStatus :many
-SELECT pr.id, pr.host_id, pr.job_id, pr.patch_type, pr.package_name, pr.package_names, pr.status, pr.shell_output, pr.error_message, pr.started_at, pr.completed_at, pr.scheduled_at, pr.triggered_by_user_id, pr.approved_by_user_id, pr.dry_run, pr.packages_affected, pr.policy_id, pr.policy_name, pr.policy_snapshot, pr.validation_run_id, pr.created_at, pr.updated_at, h.friendly_name AS host_friendly_name, h.hostname AS host_hostname, u.username AS triggered_by_username
+SELECT pr.id, pr.host_id, pr.job_id, pr.patch_type, pr.package_name, pr.package_names, pr.status, pr.shell_output, pr.error_message, pr.started_at, pr.completed_at, pr.scheduled_at, pr.triggered_by_user_id, pr.approved_by_user_id, pr.dry_run, pr.packages_affected, pr.policy_id, pr.policy_name, pr.policy_snapshot, pr.validation_run_id, pr.created_at, pr.updated_at, pr.fork_solved_at, pr.fork_solved_by, pr.fork_solved_note, pr.fork_solved_by_run_id, h.friendly_name AS host_friendly_name, h.hostname AS host_hostname, u.username AS triggered_by_username
 FROM patch_runs pr
 LEFT JOIN hosts h ON pr.host_id = h.id
 LEFT JOIN users u ON pr.triggered_by_user_id = u.id
@@ -1514,6 +1722,10 @@ type ListPatchRunsOrderByStatusRow struct {
 	ValidationRunID     *string          `json:"validation_run_id"`
 	CreatedAt           pgtype.Timestamp `json:"created_at"`
 	UpdatedAt           pgtype.Timestamp `json:"updated_at"`
+	ForkSolvedAt        *time.Time       `json:"fork_solved_at"`
+	ForkSolvedBy        *string          `json:"fork_solved_by"`
+	ForkSolvedNote      *string          `json:"fork_solved_note"`
+	ForkSolvedByRunID   *string          `json:"fork_solved_by_run_id"`
 	HostFriendlyName    *string          `json:"host_friendly_name"`
 	HostHostname        *string          `json:"host_hostname"`
 	TriggeredByUsername *string          `json:"triggered_by_username"`
@@ -1557,6 +1769,10 @@ func (q *Queries) ListPatchRunsOrderByStatus(ctx context.Context, arg ListPatchR
 			&i.ValidationRunID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ForkSolvedAt,
+			&i.ForkSolvedBy,
+			&i.ForkSolvedNote,
+			&i.ForkSolvedByRunID,
 			&i.HostFriendlyName,
 			&i.HostHostname,
 			&i.TriggeredByUsername,
@@ -1572,7 +1788,7 @@ func (q *Queries) ListPatchRunsOrderByStatus(ctx context.Context, arg ListPatchR
 }
 
 const listPatchRunsOrderByStatusDesc = `-- name: ListPatchRunsOrderByStatusDesc :many
-SELECT pr.id, pr.host_id, pr.job_id, pr.patch_type, pr.package_name, pr.package_names, pr.status, pr.shell_output, pr.error_message, pr.started_at, pr.completed_at, pr.scheduled_at, pr.triggered_by_user_id, pr.approved_by_user_id, pr.dry_run, pr.packages_affected, pr.policy_id, pr.policy_name, pr.policy_snapshot, pr.validation_run_id, pr.created_at, pr.updated_at, h.friendly_name AS host_friendly_name, h.hostname AS host_hostname, u.username AS triggered_by_username
+SELECT pr.id, pr.host_id, pr.job_id, pr.patch_type, pr.package_name, pr.package_names, pr.status, pr.shell_output, pr.error_message, pr.started_at, pr.completed_at, pr.scheduled_at, pr.triggered_by_user_id, pr.approved_by_user_id, pr.dry_run, pr.packages_affected, pr.policy_id, pr.policy_name, pr.policy_snapshot, pr.validation_run_id, pr.created_at, pr.updated_at, pr.fork_solved_at, pr.fork_solved_by, pr.fork_solved_note, pr.fork_solved_by_run_id, h.friendly_name AS host_friendly_name, h.hostname AS host_hostname, u.username AS triggered_by_username
 FROM patch_runs pr
 LEFT JOIN hosts h ON pr.host_id = h.id
 LEFT JOIN users u ON pr.triggered_by_user_id = u.id
@@ -1618,6 +1834,10 @@ type ListPatchRunsOrderByStatusDescRow struct {
 	ValidationRunID     *string          `json:"validation_run_id"`
 	CreatedAt           pgtype.Timestamp `json:"created_at"`
 	UpdatedAt           pgtype.Timestamp `json:"updated_at"`
+	ForkSolvedAt        *time.Time       `json:"fork_solved_at"`
+	ForkSolvedBy        *string          `json:"fork_solved_by"`
+	ForkSolvedNote      *string          `json:"fork_solved_note"`
+	ForkSolvedByRunID   *string          `json:"fork_solved_by_run_id"`
 	HostFriendlyName    *string          `json:"host_friendly_name"`
 	HostHostname        *string          `json:"host_hostname"`
 	TriggeredByUsername *string          `json:"triggered_by_username"`
@@ -1661,6 +1881,10 @@ func (q *Queries) ListPatchRunsOrderByStatusDesc(ctx context.Context, arg ListPa
 			&i.ValidationRunID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ForkSolvedAt,
+			&i.ForkSolvedBy,
+			&i.ForkSolvedNote,
+			&i.ForkSolvedByRunID,
 			&i.HostFriendlyName,
 			&i.HostHostname,
 			&i.TriggeredByUsername,
@@ -1676,7 +1900,7 @@ func (q *Queries) ListPatchRunsOrderByStatusDesc(ctx context.Context, arg ListPa
 }
 
 const listRecentPatchRuns = `-- name: ListRecentPatchRuns :many
-SELECT pr.id, pr.host_id, pr.job_id, pr.patch_type, pr.package_name, pr.package_names, pr.status, pr.shell_output, pr.error_message, pr.started_at, pr.completed_at, pr.scheduled_at, pr.triggered_by_user_id, pr.approved_by_user_id, pr.dry_run, pr.packages_affected, pr.policy_id, pr.policy_name, pr.policy_snapshot, pr.validation_run_id, pr.created_at, pr.updated_at, h.friendly_name AS host_friendly_name, h.hostname AS host_hostname, u.username AS triggered_by_username
+SELECT pr.id, pr.host_id, pr.job_id, pr.patch_type, pr.package_name, pr.package_names, pr.status, pr.shell_output, pr.error_message, pr.started_at, pr.completed_at, pr.scheduled_at, pr.triggered_by_user_id, pr.approved_by_user_id, pr.dry_run, pr.packages_affected, pr.policy_id, pr.policy_name, pr.policy_snapshot, pr.validation_run_id, pr.created_at, pr.updated_at, pr.fork_solved_at, pr.fork_solved_by, pr.fork_solved_note, pr.fork_solved_by_run_id, h.friendly_name AS host_friendly_name, h.hostname AS host_hostname, u.username AS triggered_by_username
 FROM patch_runs pr
 LEFT JOIN hosts h ON pr.host_id = h.id
 LEFT JOIN users u ON pr.triggered_by_user_id = u.id
@@ -1708,6 +1932,10 @@ type ListRecentPatchRunsRow struct {
 	ValidationRunID     *string          `json:"validation_run_id"`
 	CreatedAt           pgtype.Timestamp `json:"created_at"`
 	UpdatedAt           pgtype.Timestamp `json:"updated_at"`
+	ForkSolvedAt        *time.Time       `json:"fork_solved_at"`
+	ForkSolvedBy        *string          `json:"fork_solved_by"`
+	ForkSolvedNote      *string          `json:"fork_solved_note"`
+	ForkSolvedByRunID   *string          `json:"fork_solved_by_run_id"`
 	HostFriendlyName    *string          `json:"host_friendly_name"`
 	HostHostname        *string          `json:"host_hostname"`
 	TriggeredByUsername *string          `json:"triggered_by_username"`
@@ -1745,6 +1973,10 @@ func (q *Queries) ListRecentPatchRuns(ctx context.Context, limit int32) ([]ListR
 			&i.ValidationRunID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ForkSolvedAt,
+			&i.ForkSolvedBy,
+			&i.ForkSolvedNote,
+			&i.ForkSolvedByRunID,
 			&i.HostFriendlyName,
 			&i.HostHostname,
 			&i.TriggeredByUsername,

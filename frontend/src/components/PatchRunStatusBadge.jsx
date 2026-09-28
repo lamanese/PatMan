@@ -36,6 +36,10 @@ const STATUS_MAP = {
 		class: "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200",
 		label: "Failed",
 	},
+	solved: {
+		class: "bg-teal-100 text-teal-800 dark:bg-teal-900 dark:text-teal-200",
+		label: "Solved",
+	},
 	approved: {
 		class:
 			"bg-emerald-100 text-emerald-800 dark:bg-emerald-900 dark:text-emerald-200",

@@ -30,6 +30,10 @@ var forkOwnedIdentifiers = []string{
 	"fork_archive_keep",
 	"fork_archive_keep_range",
 	"delivery_enabled",
+	"fork_solved_at",
+	"fork_solved_by",
+	"fork_solved_note",
+	"fork_solved_by_run_id",
 }
 
 func TestUpstreamMigrationsDoNotTouchForkObjects(t *testing.T) {

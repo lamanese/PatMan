@@ -212,6 +212,12 @@ type Querier interface {
 	FindSessionWithTfaBypass(ctx context.Context, arg FindSessionWithTfaBypassParams) (FindSessionWithTfaBypassRow, error)
 	FindValidTrustedDevice(ctx context.Context, arg FindValidTrustedDeviceParams) (UserTrustedDevice, error)
 	ForkAbandonStaleReportArchive(ctx context.Context, scheduledReportID string) (int64, error)
+	// Fork: a completed real run solves the older failed runs of its host:
+	// patch_all solves every failed run, patch_package only failed runs with the
+	// same package selection. Returns the ids that were solved.
+	ForkAutoSolvePatchRuns(ctx context.Context, completedRunID string) ([]string, error)
+	// Fork: same as ForkSolvePatchRun for a list of ids; returns the ids that changed.
+	ForkBulkSolvePatchRuns(ctx context.Context, arg ForkBulkSolvePatchRunsParams) ([]string, error)
 	// Fork additions below - do not edit CancelStalledPatchRuns above so an
 	// upstream sync never conflicts on it; the fork's patch-run-cleanup job
 	// (internal/queue/workers.go) uses the two queries below instead, which
@@ -245,6 +251,8 @@ type Querier interface {
 	// Fork: auto-enrollment refuses a second host for a machine that is already
 	// enrolled (409 with the existing host) instead of creating a duplicate.
 	ForkGetHostByMachineID(ctx context.Context, machineID *string) (ForkGetHostByMachineIDRow, error)
+	// Fork: who solved the run (NULL for automatic or deleted users).
+	ForkGetPatchRunSolvedByUsername(ctx context.Context, id string) (*string, error)
 	ForkGetReportArchiveByRunKey(ctx context.Context, runKey string) (ForkGetReportArchiveByRunKeyRow, error)
 	ForkGetReportArchiveContent(ctx context.Context, id string) (ForkGetReportArchiveContentRow, error)
 	ForkGetReportArchivePDF(ctx context.Context, id string) (ForkGetReportArchivePDFRow, error)
@@ -261,6 +269,8 @@ type Querier interface {
 	ForkListReportDeliveriesForReport(ctx context.Context, scheduledReportID string) ([]ForkReportDelivery, error)
 	ForkMarkReportDelivery(ctx context.Context, arg ForkMarkReportDeliveryParams) error
 	ForkPruneReportArchive(ctx context.Context, id string) (int64, error)
+	// Fork: back to failed; the note is kept as history.
+	ForkReopenPatchRun(ctx context.Context, id string) (int64, error)
 	// Fork: queries for host-group-scoped scheduled reports (internal/reports).
 	// Every query filters by host_ids FIRST and only then aggregates, sorts or
 	// limits, so a report for one group can never see another group's data.
@@ -286,6 +296,8 @@ type Querier interface {
 	ForkSetScheduledReportForkFields(ctx context.Context, arg ForkSetScheduledReportForkFieldsParams) error
 	ForkSetScheduledReportNextRunIfNull(ctx context.Context, arg ForkSetScheduledReportNextRunIfNullParams) (int64, error)
 	ForkSnapshotReportArchive(ctx context.Context, arg ForkSnapshotReportArchiveParams) error
+	// Fork: an operator marks a failed run as solved; output and error stay.
+	ForkSolvePatchRun(ctx context.Context, arg ForkSolvePatchRunParams) (int64, error)
 	// Fork: last boot instant reported by agents 2.0.20+. Kept out of
 	// UpdateHostFromReport so that upstream query stays untouched. The caller only
 	// invokes it with a plausible value; a missing value never clears the column.
@@ -299,6 +311,7 @@ type Querier interface {
 	// Fork: "package manager is in a broken state" hint reported by agents 2.0.15+.
 	// Kept out of UpdateHostFromReport so that upstream query stays untouched.
 	ForkUpdateHostPackageState(ctx context.Context, arg ForkUpdateHostPackageStateParams) error
+	ForkUpdatePatchRunSolvedNote(ctx context.Context, arg ForkUpdatePatchRunSolvedNoteParams) (int64, error)
 	GetAcceptedVersionsByUserID(ctx context.Context, userID string) ([]string, error)
 	GetAlertActionByName(ctx context.Context, name string) (AlertAction, error)
 	GetAlertByID(ctx context.Context, id string) (GetAlertByIDRow, error)

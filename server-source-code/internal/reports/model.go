@@ -47,6 +47,7 @@ type ExecutiveSummary struct {
 	RunsTotal          int
 	RunsCompleted      int
 	RunsFailed         int
+	RunsSolved         int // fork: failed runs marked as solved (not counted as failed)
 	RunsRunning        int
 }
 
@@ -217,6 +218,7 @@ type PatchActivity struct {
 	Rows      []PatchRunRow
 	Completed int
 	Failed    int
+	Solved    int // fork: see ExecutiveSummary.RunsSolved
 	Other     int
 	Truncated bool
 }

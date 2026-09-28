@@ -701,7 +701,11 @@ CREATE TABLE IF NOT EXISTS patch_runs (
     policy_snapshot JSONB,
     validation_run_id TEXT REFERENCES patch_runs(id) ON DELETE SET NULL,
     created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP(3) NOT NULL
+    updated_at TIMESTAMP(3) NOT NULL,
+    fork_solved_at TIMESTAMPTZ,
+    fork_solved_by TEXT,
+    fork_solved_note TEXT,
+    fork_solved_by_run_id TEXT
 );
 
 -- alert_config

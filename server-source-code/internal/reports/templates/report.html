@@ -130,6 +130,7 @@
 <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;"><tr>
 {{template "kpi" (dict "Value" .Completed "Label" (t $T "kpi.runs_completed") "Color" "#16a34a")}}
 {{template "kpi" (dict "Value" .Failed "Label" (t $T "kpi.runs_failed") "Color" (zeroGreen .Failed))}}
+{{template "kpi" (dict "Value" .Solved "Label" (t $T "kpi.runs_solved") "Color" "#0d9488")}}
 </tr></table>
 {{if .Rows}}<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin-bottom:8px;"><tr>{{template "th" (t $T "col.date")}}{{template "th" (t $T "col.host")}}{{template "th" (t $T "col.type")}}{{template "th" (t $T "col.result")}}{{template "th" (t $T "col.package_count")}}</tr>
 {{range $i, $r := .Rows}}<tr><td style="{{$td}}background-color:{{alt $i}};">{{dt $T $L $r.CreatedAt}}</td><td style="{{$td}}background-color:{{alt $i}};">{{if $links}}<a href="{{$base}}/patching/runs/{{$r.ID}}" style="color:#2563eb;text-decoration:none;">{{$r.HostName}}</a>{{else}}{{$r.HostName}}{{end}}</td><td style="{{$td}}background-color:{{alt $i}};">{{status $T $r.PatchType}}{{if $r.DryRun}} – {{t $T "val.dry_run"}}{{end}}</td><td style="{{$td}}background-color:{{alt $i}};">{{template "badge" (dict "C" (statusColor $r.Status) "Text" (status $T $r.Status))}}</td><td style="{{$td}}background-color:{{alt $i}};">{{intp $T $r.PackageCount}}</td></tr>{{end}}

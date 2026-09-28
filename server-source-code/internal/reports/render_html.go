@@ -157,6 +157,8 @@ func statusColor(status string) badgeColor {
 		return badgeColor{FG: "#6366f1", BG: "#eef2ff"}
 	case "inactive", "offline", "cancelled":
 		return badgeColor{FG: "#94a3b8", BG: "#f1f5f9"}
+	case "solved":
+		return badgeColor{FG: "#0d9488", BG: "#f0fdfa"}
 	}
 	return badgeColor{FG: "#64748b", BG: "#f1f5f9"}
 }

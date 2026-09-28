@@ -1,4 +1,10 @@
-import { CheckCircle, Clock, ListChecks, XCircle } from "lucide-react";
+import {
+	CheckCheck,
+	CheckCircle,
+	Clock,
+	ListChecks,
+	XCircle,
+} from "lucide-react";
 import { Link } from "react-router-dom";
 
 const PatchRunStatusBoxes = ({ data }) => {
@@ -7,6 +13,7 @@ const PatchRunStatusBoxes = ({ data }) => {
 	const active = (summary.queued ?? 0) + (summary.running ?? 0);
 	const completed = summary.completed ?? 0;
 	const failed = summary.failed ?? 0;
+	const solved = summary.solved ?? 0;
 
 	const boxes = [
 		{
@@ -36,6 +43,13 @@ const PatchRunStatusBoxes = ({ data }) => {
 			Icon: XCircle,
 			icon_class: "text-red-600",
 			to: "/patching?tab=runs&status=failed",
+		},
+		{
+			label: "Solved",
+			value: solved,
+			Icon: CheckCheck,
+			icon_class: "text-teal-600",
+			to: "/patching?tab=runs&status=solved",
 		},
 	];
 

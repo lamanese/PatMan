@@ -182,3 +182,26 @@ func TestRenderHTMLExecutiveComplianceOnlyWhenIncluded(t *testing.T) {
 		t.Fatalf("no scans must render a note, not 0.0%%:\n%s", none)
 	}
 }
+
+// A solved run is neither completed nor failed: it has its own counter and
+// label, and it never inflates the failed KPI.
+func TestRenderHTMLSolvedRunsHaveOwnLabelAndCounter(t *testing.T) {
+	tx := T("en")
+	m := sampleModel("en", true)
+	m.PatchActivity.Rows = append(m.PatchActivity.Rows, PatchRunRow{ID: "r9", HostID: "h1", HostName: "web01", Status: "solved", PatchType: "patch_all", CreatedAt: m.GeneratedAt})
+	m.PatchActivity.Solved = 1
+	m.ExecutiveSummary.RunsSolved = 1
+	out, err := RenderHTML(m, Branding{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, tx.S("status.solved")) || strings.Contains(out, "[[status.solved]]") {
+		t.Fatalf("solved status label missing:\n%s", out)
+	}
+	if !strings.Contains(out, tx.S("kpi.runs_solved")) {
+		t.Fatalf("solved KPI missing in patch activity:\n%s", out)
+	}
+	if T("de").S("status.solved") == tx.S("status.solved") {
+		t.Fatal("German label for solved missing")
+	}
+}

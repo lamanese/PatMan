@@ -204,7 +204,7 @@ func writeJSONWithDeadline(conn *websocket.Conn, v any) error {
 // isTerminalPatchStatus reports whether a run has already reached a final state.
 func isTerminalPatchStatus(status string) bool {
 	switch status {
-	case "completed", "failed", "cancelled", "validated", "dry_run_completed":
+	case "completed", "failed", "cancelled", "validated", "dry_run_completed", "solved":
 		return true
 	default:
 		return false

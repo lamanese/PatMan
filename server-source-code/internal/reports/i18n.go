@@ -107,6 +107,7 @@ var texts = map[string]map[string]string{
 		"kpi.runs_total":             "Patch runs",
 		"kpi.runs_completed":         "Completed",
 		"kpi.runs_failed":            "Failed",
+		"kpi.runs_solved":            "Solved",
 		"kpi.runs_running":           "Running",
 		"kpi.passed_rules":           "Passed rules",
 		"kpi.failed_rules":           "Failed rules",
@@ -185,6 +186,7 @@ var texts = map[string]map[string]string{
 
 		"status.completed":          "Completed",
 		"status.failed":             "Failed",
+		"status.solved":             "Solved",
 		"status.running":            "Running",
 		"status.queued":             "Queued",
 		"status.pending":            "Pending",
@@ -239,6 +241,7 @@ var texts = map[string]map[string]string{
 		"kpi.runs_total":             "Patch-Läufe",
 		"kpi.runs_completed":         "Abgeschlossen",
 		"kpi.runs_failed":            "Fehlgeschlagen",
+		"kpi.runs_solved":            "Gelöst",
 		"kpi.runs_running":           "Laufend",
 		"kpi.passed_rules":           "Bestandene Regeln",
 		"kpi.failed_rules":           "Verletzte Regeln",
@@ -312,6 +315,7 @@ var texts = map[string]map[string]string{
 
 		"status.completed":          "Abgeschlossen",
 		"status.failed":             "Fehlgeschlagen",
+		"status.solved":             "Gelöst",
 		"status.running":            "Laufend",
 		"status.queued":             "Eingereiht",
 		"status.pending":            "Ausstehend",
