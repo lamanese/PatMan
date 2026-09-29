@@ -1973,7 +1973,7 @@ Create a `Delayed 30min` policy with `patch_delay_type=delayed`, `delay_minutes=
 
 A **patch policy** only controls the timing of a run that *someone triggers*; it never fires on its own. **Patch schedules** are the recurring counterpart: a schedule fires a full patch run (`patch_all`) on every host in a group at the configured time, with no manual trigger. Use a schedule for "patch the `production` group every Sunday at 03:00"; use a policy for "when someone patches this host, delay it to the next maintenance window".
 
-**Operations → Patch Schedules** manages them. Each schedule targets exactly **one host group**; membership is resolved at execution time, so hosts added to the group later are included automatically. The form previews the group's hosts ("will patch") so arming a schedule is never blind.
+**Operations → Schedules → Patch** (`/schedules?tab=patch`) manages them; the page shares its tab bar with reboot schedules, each tab keeps its own permission. The old address `/patch-schedules` redirects there. Each schedule targets exactly **one host group**; membership is resolved at execution time, so hosts added to the group later are included automatically. The form previews the group's hosts ("will patch") so arming a schedule is never blind.
 
 Access is gated by the `patching` module plus the `can_manage_patching` permission (the same write permission as manual patch runs); read access to the list needs `can_view_hosts`. When `patching` is not enabled the navigation entry is hidden.
 
@@ -5194,7 +5194,7 @@ On the host itself the reboot is scheduled with a **1-minute delay** (`shutdown 
 
 ### Permissions
 
-Everything reboot-related sits behind a dedicated, deliberately restrictive permission: **`can_reboot_hosts`**. By default only the `superadmin` and `admin` roles have it. To grant it to another role, go to **Settings → Users → Roles** and enable **Reboot Hosts** in the *Operations* group. Permissions are per role, not per user. Without the permission, the reboot buttons on the Hosts page and the *Reboot Schedules* navigation entry are hidden, and the API returns 403.
+Everything reboot-related sits behind a dedicated, deliberately restrictive permission: **`can_reboot_hosts`**. By default only the `superadmin` and `admin` roles have it. To grant it to another role, go to **Settings → Users → Roles** and enable **Reboot Hosts** in the *Operations* group. Permissions are per role, not per user. Without the permission, the reboot buttons on the Hosts page and the *Schedules → Reboot* navigation entry (and tab) are hidden, and the API returns 403.
 
 One nuance to be aware of: users with only `can_manage_hosts` can change host-group membership and thereby change which hosts an existing schedule targets. The blast radius is limited to hosts already on the reboot allowlist (changing that requires `can_reboot_hosts`), and every run audits the resolved host list.
 
@@ -5215,7 +5215,7 @@ Limits: maximum 100 hosts per request, and a 2-minute per-host cooldown prevents
 
 ### Reboot Schedules
 
-**Operations → Reboot Schedules** manages scheduled reboots. Each schedule targets exactly **one host group**; membership is resolved at execution time, so hosts added to the group later are included automatically (subject to the allowlist).
+**Operations → Schedules → Reboot** (`/schedules?tab=reboot`) manages scheduled reboots; the old address `/reboot-schedules` redirects there. Each schedule targets exactly **one host group**; membership is resolved at execution time, so hosts added to the group later are included automatically (subject to the allowlist).
 
 #### Schedule types
 

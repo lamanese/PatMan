@@ -301,25 +301,27 @@ const Layout = ({ children }) => {
 					lockedTier: patchingLocked ? getRequiredTier("patching") : null,
 					children: patchingChildren,
 				});
-
-				// Scheduled patch runs for a host group; gated by the patch
-				// management permission and the patching module.
-				if (canManagePatching() && hasModule("patching")) {
-					opsItems.push({
-						name: "Patch Schedules",
-						href: "/patch-schedules",
-						icon: CalendarClock,
-					});
-				}
 			}
 
-			// Scheduled remote reboots; gated by the same permission as the
-			// manual reboot actions on the hosts page.
+			// Patch and reboot schedules share one page (/schedules). Each child
+			// keeps the gate of its tab and of its server API; the parent shows up
+			// as soon as one child is visible.
+			const scheduleChildren = [];
+			if (canViewHosts() && canManagePatching() && hasModule("patching")) {
+				scheduleChildren.push({ name: "Patch", href: "/schedules?tab=patch" });
+			}
 			if (hasPermission("can_reboot_hosts")) {
+				scheduleChildren.push({
+					name: "Reboot",
+					href: "/schedules?tab=reboot",
+				});
+			}
+			if (scheduleChildren.length > 0) {
 				opsItems.push({
-					name: "Reboot Schedules",
-					href: "/reboot-schedules",
+					name: "Schedules",
+					href: "/schedules",
 					icon: CalendarClock,
+					children: scheduleChildren,
 				});
 			}
 
@@ -366,7 +368,6 @@ const Layout = ({ children }) => {
 					name: "Reporting",
 					href: "/reporting",
 					icon: AlertTriangle,
-					new: true,
 					children: reportingChildren,
 				});
 			}
@@ -520,8 +521,7 @@ const Layout = ({ children }) => {
 		if (path === "/docker") return "Docker";
 		if (path === "/pro-action") return "Pro-Action";
 		if (path === "/automation") return "Automation";
-		if (path === "/reboot-schedules") return "Reboot Schedules";
-		if (path === "/patch-schedules") return "Patch Schedules";
+		if (path === "/schedules") return "Schedules";
 		if (path === "/patching" || path.startsWith("/patching/"))
 			return "Patching";
 		if (path === "/compliance" || path.startsWith("/compliance/"))

@@ -1,5 +1,5 @@
 import { lazy, Suspense } from "react";
-import { Outlet, Route, Routes } from "react-router-dom";
+import { Navigate, Outlet, Route, Routes } from "react-router-dom";
 import ErrorBoundary from "./components/ErrorBoundary";
 import FirstTimeWizard from "./components/FirstTimeWizard";
 import Layout from "./components/Layout";
@@ -70,8 +70,7 @@ const AiSettings = lazy(() => import("./pages/settings/AiSettings"));
 const DiscordSettings = lazy(() => import("./pages/settings/DiscordSettings"));
 const OidcSettings = lazy(() => import("./pages/settings/OidcSettings"));
 const Billing = lazy(() => import("./pages/Billing"));
-const RebootSchedules = lazy(() => import("./pages/RebootSchedules"));
-const PatchSchedules = lazy(() => import("./pages/PatchSchedules"));
+const Schedules = lazy(() => import("./pages/Schedules"));
 
 // Full-screen loading fallback (for initial app load / auth check)
 const LoadingFallback = () => (
@@ -209,20 +208,26 @@ function AppRoutes() {
 						}
 					/>
 					<Route
-						path="/reboot-schedules"
+						path="/schedules"
 						element={
-							<ProtectedRoute requirePermission="can_reboot_hosts">
-								<RebootSchedules />
+							<ProtectedRoute
+								requireAnyPermissions={[
+									"can_manage_patching",
+									"can_reboot_hosts",
+								]}
+							>
+								<Schedules />
 							</ProtectedRoute>
 						}
 					/>
+					{/* Old standalone schedule pages, kept as redirects for bookmarks and doc links */}
+					<Route
+						path="/reboot-schedules"
+						element={<Navigate to="/schedules?tab=reboot" replace />}
+					/>
 					<Route
 						path="/patch-schedules"
-						element={
-							<ProtectedRoute requirePermission="can_manage_patching">
-								<PatchSchedules />
-							</ProtectedRoute>
-						}
+						element={<Navigate to="/schedules?tab=patch" replace />}
 					/>
 					<Route
 						path="/patching"
