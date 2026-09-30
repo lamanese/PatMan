@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"unicode/utf8"
 
 	"github.com/PatchMon/PatchMon/server-source-code/internal/database"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/db"
@@ -51,4 +52,16 @@ func auditFromRequest(r *http.Request, d *database.DB, event string, detail map[
 		requestID = &rid
 	}
 	return insertAudit(ctx, d, event, userID, clientIPFromRequest(r), r.UserAgent(), requestID, detail)
+}
+
+// auditTextMaxRunes caps free-form client strings stored in audit details.
+const auditTextMaxRunes = 256
+
+// auditText truncates s to auditTextMaxRunes runes and appends "…" when it
+// was cut, so a client cannot bloat audit rows with arbitrary input.
+func auditText(s string) string {
+	if utf8.RuneCountInString(s) <= auditTextMaxRunes {
+		return s
+	}
+	return string([]rune(s)[:auditTextMaxRunes]) + "…"
 }

@@ -73,13 +73,15 @@ func (s rdpOpenSession) closedDetail(now time.Time) map[string]interface{} {
 }
 
 // auditSession writes a best-effort RDP session audit row on a context that
-// ignores cancellation (the tunnel may already be gone).
-func (h *RDPHandler) auditSession(ctx context.Context, event, userID string, detail map[string]interface{}) {
+// ignores cancellation (the tunnel may already be gone), bounded by a 5 s
+// timeout. ip/ua are empty for the close row.
+func (h *RDPHandler) auditSession(ctx context.Context, event, ip, ua, userID string, detail map[string]interface{}) {
 	if h.db == nil {
 		return
 	}
-	bg := context.WithoutCancel(ctx)
-	if err := insertAudit(bg, h.db.DB(bg), event, &userID, "", "", nil, detail); err != nil {
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := insertAudit(actx, h.db.DB(actx), event, &userID, ip, ua, nil, detail); err != nil {
 		h.log.Warn("rdp audit write failed", "event", event, "user_id", userID, "error", err)
 	}
 }
@@ -92,7 +94,7 @@ func (h *RDPHandler) onTunnelDisconnect(id string, r *http.Request, _ guac.Tunne
 		return
 	}
 	s := v.(rdpOpenSession)
-	h.auditSession(r.Context(), "rdp_session_closed", s.userID, s.closedDetail(time.Now()))
+	h.auditSession(r.Context(), "rdp_session_closed", "", "", s.userID, s.closedDetail(time.Now()))
 }
 
 // NewRDPHandler creates a new RDP handler.
@@ -263,6 +265,22 @@ func (h *RDPHandler) ServeCreateTicket(w http.ResponseWriter, r *http.Request) {
 		_ = probe.Close()
 	}
 
+	hostName := host.FriendlyName
+	if hostName == "" && host.Hostname != nil {
+		hostName = *host.Hostname
+	}
+
+	// Fail-closed: no audit row, no proxy session. Written before the session
+	// is created so no rdp_proxy reaches the agent (and no TCP connect to
+	// 3389 happens) without a row. rdp_session_opened carries the session id.
+	if err := auditFromRequest(r, h.db.DB(r.Context()), "rdp_ticket_issued", map[string]interface{}{
+		"host_id":   host.ID,
+		"host_name": hostName,
+	}); err != nil {
+		Error(w, http.StatusInternalServerError, "Failed to write audit log")
+		return
+	}
+
 	sessionID, port, err := h.rdpSessions.Create(r.Context(), host.ApiID, host.ID)
 	if err != nil {
 		if errors.Is(err, rdpproxy.ErrMaxSessionsReached) {
@@ -338,24 +356,6 @@ func (h *RDPHandler) ServeCreateTicket(w http.ResponseWriter, r *http.Request) {
 			"error": msg,
 			"code":  classifyAgentError(msg),
 		})
-		return
-	}
-
-	hostName := host.FriendlyName
-	if hostName == "" && host.Hostname != nil {
-		hostName = *host.Hostname
-	}
-
-	// Fail-closed: no audit row, no ticket. Tear the proxy session down the
-	// same way the ticket-store failure below does.
-	if err := auditFromRequest(r, h.db.DB(r.Context()), "rdp_ticket_issued", map[string]interface{}{
-		"host_id":    host.ID,
-		"host_name":  hostName,
-		"session_id": sessionID,
-	}); err != nil {
-		h.rdpSessions.SendDisconnect(sessionID)
-		h.rdpSessions.Delete(sessionID)
-		Error(w, http.StatusInternalServerError, "Failed to write audit log")
 		return
 	}
 
@@ -604,7 +604,7 @@ func (h *RDPHandler) doGuacConnect(r *http.Request) (guac.Tunnel, error) {
 		"missing_username_or_password", data.Username == "" || data.Password == "",
 	)
 
-	h.auditSession(r.Context(), "rdp_session_opened", data.UserID, map[string]interface{}{
+	h.auditSession(r.Context(), "rdp_session_opened", clientIPFromRequest(r), r.UserAgent(), data.UserID, map[string]interface{}{
 		"host_id": data.HostID, "session_id": data.SessionID, "user_id": data.UserID,
 	})
 

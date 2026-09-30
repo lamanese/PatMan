@@ -5,13 +5,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"sync"
 	"time"
@@ -141,7 +139,7 @@ func (h *SshTerminalWSHandler) ServeWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.log.Info("ssh-terminal connected", "user", user.Username, "host", host.FriendlyName, "host_id", hostID)
-	h.auditSession(r.Context(), "ssh_session_opened", user, map[string]interface{}{
+	h.auditSession(r.Context(), "ssh_session_opened", clientIPFromRequest(r), r.UserAgent(), user, map[string]interface{}{
 		"host_id": host.ID, "host_name": host.FriendlyName, "user": user.Username,
 	})
 	h.handleConnection(r.Context(), conn, host, user)
@@ -149,27 +147,34 @@ func (h *SshTerminalWSHandler) ServeWS(w http.ResponseWriter, r *http.Request) {
 
 // auditSession writes a best-effort session audit row. The WebSocket may
 // already be gone, so the row is written on a context that ignores
-// cancellation; failures only log a warning.
-func (h *SshTerminalWSHandler) auditSession(ctx context.Context, event string, user *models.User, detail map[string]interface{}) {
+// cancellation (bounded by a 5 s timeout); failures only log a warning.
+// ip/ua are empty for the close row (no request any more).
+func (h *SshTerminalWSHandler) auditSession(ctx context.Context, event, ip, ua string, user *models.User, detail map[string]interface{}) {
 	if h.db == nil {
 		return
 	}
-	bg := context.WithoutCancel(ctx)
-	if err := insertAudit(bg, h.db.DB(bg), event, &user.ID, "", "", nil, detail); err != nil && h.log != nil {
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := insertAudit(actx, h.db.DB(actx), event, &user.ID, ip, ua, nil, detail); err != nil && h.log != nil {
 		h.log.Warn("ssh-terminal audit write failed", "event", event, "user_id", user.ID, "error", err)
 	}
 }
 
 // sshSessionClosedDetail builds the ssh_session_closed audit detail. mode is
-// "proxy", "direct" or "none" (socket closed without a connect).
-func sshSessionClosedDetail(host *models.Host, user *models.User, mode string, started, now time.Time) map[string]interface{} {
-	return map[string]interface{}{
+// "proxy", "direct" or "none" (socket closed without a connect). port is the
+// proxy target port and is only recorded for proxy mode.
+func sshSessionClosedDetail(host *models.Host, user *models.User, mode string, port int, started, now time.Time) map[string]interface{} {
+	d := map[string]interface{}{
 		"host_id":    host.ID,
 		"host_name":  host.FriendlyName,
 		"user":       user.Username,
 		"mode":       mode,
 		"duration_s": int(now.Sub(started).Seconds()),
 	}
+	if mode == "proxy" && port > 0 {
+		d["port"] = port
+	}
+	return d
 }
 
 func (h *SshTerminalWSHandler) rejectUpgrade(w http.ResponseWriter, r *http.Request, code int, msg string) {
@@ -181,6 +186,7 @@ func (h *SshTerminalWSHandler) handleConnection(ctx context.Context, conn *webso
 
 	started := time.Now()
 	mode := "none" // set to "proxy" or "direct" once a connect is sent/established
+	auditPort := 0 // proxy target port, recorded in the close audit row
 	var closeAudit sync.Once
 
 	var sshClient *ssh.Client
@@ -227,9 +233,9 @@ func (h *SshTerminalWSHandler) handleConnection(ctx context.Context, conn *webso
 		releaseConn()
 		closeAudit.Do(func() {
 			mu.Lock()
-			m := mode
+			m, port := mode, auditPort
 			mu.Unlock()
-			h.auditSession(ctx, "ssh_session_closed", user, sshSessionClosedDetail(host, user, m, started, time.Now()))
+			h.auditSession(ctx, "ssh_session_closed", "", "", user, sshSessionClosedDetail(host, user, m, port, started, time.Now()))
 		})
 	}
 	defer cleanup()
@@ -287,17 +293,12 @@ func (h *SshTerminalWSHandler) handleConnection(ctx context.Context, conn *webso
 					continue
 				}
 
-				proxyHost := msg.ProxyHost
-				if proxyHost == "" {
-					proxyHost = "localhost"
-				}
+				// The agent only ever dials localhost; msg.ProxyHost is ignored so
+				// that older agents (2.0.20 and below) cannot be steered into the
+				// network behind them either.
 				proxyPort := msg.ProxyPort
 				if proxyPort <= 0 {
 					proxyPort = 22
-				}
-				if err := validateProxyHost(proxyHost); err != nil {
-					send(map[string]string{"type": "error", "message": "Invalid proxy host format"})
-					continue
 				}
 				if proxyPort < 1 || proxyPort > 65535 {
 					send(map[string]string{"type": "error", "message": "Invalid proxy port (must be 1-65535)"})
@@ -318,7 +319,7 @@ func (h *SshTerminalWSHandler) handleConnection(ctx context.Context, conn *webso
 				req := map[string]interface{}{
 					"type":       "ssh_proxy",
 					"session_id": proxySessionID,
-					"host":       proxyHost,
+					"host":       "localhost",
 					"port":       proxyPort,
 					"username":   orDefault(msg.Username, "root"),
 					"terminal":   orDefault(msg.Terminal, "xterm-256color"),
@@ -342,6 +343,7 @@ func (h *SshTerminalWSHandler) handleConnection(ctx context.Context, conn *webso
 				}
 				mu.Lock()
 				mode = "proxy"
+				auditPort = proxyPort
 				mu.Unlock()
 				continue
 			}
@@ -596,19 +598,4 @@ func hostIPOrHostname(host *models.Host) string {
 		return *host.Hostname
 	}
 	return "localhost"
-}
-
-var proxyHostRe = regexp.MustCompile(`^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$|^localhost$|^(\d{1,3}\.){3}\d{1,3}$`)
-
-func validateProxyHost(host string) error {
-	if host == "" {
-		return errors.New("host is required")
-	}
-	if len(host) > 255 {
-		return errors.New("host too long")
-	}
-	if !proxyHostRe.MatchString(host) {
-		return errors.New("invalid host format")
-	}
-	return nil
 }

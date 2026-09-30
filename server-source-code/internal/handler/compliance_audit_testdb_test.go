@@ -87,7 +87,7 @@ func TestTriggerScanAuditsOnlyRemediatingScans(t *testing.T) {
 	h.TriggerScan(httptest.NewRecorder(), complianceRequest(path, `{"profile_type":"openscap","enable_remediation":true}`, hostID, "user-6"))
 	var n int
 	if err := d.RawQueryRow(context.Background(), `SELECT count(*) FROM audit_logs WHERE event = 'compliance_scan_triggered' AND user_id = 'user-6'
-		AND details LIKE '%"enable_remediation":true%' AND details LIKE '%"profile":"openscap"%' AND details LIKE '%"host_id":"`+hostID+`"%'`).Scan(&n); err != nil || n != 1 {
+		AND details LIKE '%"enable_remediation":true%' AND details LIKE '%"profile":"openscap"%' AND details LIKE '%"host_name":"web01"%' AND details LIKE '%"host_id":"`+hostID+`"%'`).Scan(&n); err != nil || n != 1 {
 		t.Fatalf("audit rows=%d err=%v", n, err)
 	}
 

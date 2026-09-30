@@ -12,8 +12,8 @@ func TestSshSessionClosedDetail(t *testing.T) {
 	started := time.Date(2026, 9, 30, 10, 0, 0, 0, time.UTC)
 	host := &models.Host{ID: "h1", FriendlyName: "web01"}
 	user := &models.User{ID: "u1", Username: "ahmad"}
-	d := sshSessionClosedDetail(host, user, "proxy", started, started.Add(95*time.Second+400*time.Millisecond))
-	want := map[string]interface{}{"host_id": "h1", "host_name": "web01", "user": "ahmad", "mode": "proxy", "duration_s": 95}
+	d := sshSessionClosedDetail(host, user, "proxy", 2222, started, started.Add(95*time.Second+400*time.Millisecond))
+	want := map[string]interface{}{"host_id": "h1", "host_name": "web01", "user": "ahmad", "mode": "proxy", "port": 2222, "duration_s": 95}
 	for k, v := range want {
 		if d[k] != v {
 			t.Errorf("%s = %v, want %v", k, d[k], v)
@@ -21,6 +21,17 @@ func TestSshSessionClosedDetail(t *testing.T) {
 	}
 	if len(d) != len(want) {
 		t.Errorf("unexpected keys: %v", d)
+	}
+}
+
+// Direct mode never records a port.
+func TestSSHSessionClosedDetailDirectHasNoPort(t *testing.T) {
+	started := time.Date(2026, 9, 30, 10, 0, 0, 0, time.UTC)
+	host := &models.Host{ID: "h1", FriendlyName: "web01"}
+	user := &models.User{ID: "u1", Username: "ahmad"}
+	d := sshSessionClosedDetail(host, user, "direct", 22, started, started)
+	if _, ok := d["port"]; ok {
+		t.Errorf("direct mode must not record port: %v", d)
 	}
 }
 

@@ -845,8 +845,13 @@ func (h *ComplianceHandler) TriggerScan(w http.ResponseWriter, r *http.Request) 
 	}
 	// Only scans that may change the host are audited; plain scans are read-only.
 	if req.EnableRemediation {
+		var profileID interface{}
+		if req.ProfileID != nil {
+			profileID = auditText(*req.ProfileID)
+		}
 		if err := h.writeAudit(r, "compliance_scan_triggered", map[string]interface{}{
-			"host_id": hostID, "profile": profileType, "enable_remediation": true,
+			"host_id": hostID, "host_name": host.FriendlyName, "profile": auditText(profileType),
+			"profile_id": profileID, "enable_remediation": true,
 		}); err != nil {
 			slog.Error("refusing remediating scan: audit log write failed", "error", err)
 			Error(w, http.StatusInternalServerError, "Failed to write audit log")
@@ -1273,7 +1278,7 @@ func (h *ComplianceHandler) RemediateRule(w http.ResponseWriter, r *http.Request
 	// Audit the request before any agent contact (fail-closed); the row records
 	// the attempt, not the outcome.
 	if err := h.writeAudit(r, "compliance_remediation_requested", map[string]interface{}{
-		"host_id": hostID, "host_name": host.FriendlyName, "rule_id": req.RuleID,
+		"host_id": hostID, "host_name": host.FriendlyName, "rule_id": auditText(req.RuleID),
 	}); err != nil {
 		slog.Error("refusing remediation: audit log write failed", "error", err)
 		Error(w, http.StatusInternalServerError, "Failed to write audit log")

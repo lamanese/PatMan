@@ -45,13 +45,22 @@ func (h *SshTicketHandler) ServeCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !isValidUUID(req.HostID) {
+		JSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid host ID"})
+		return
+	}
+
+	// The host must exist before an audit row or a ticket is written.
+	host, err := h.hosts.GetByID(r.Context(), req.HostID)
+	if err != nil || host == nil {
+		JSON(w, http.StatusNotFound, map[string]string{"error": "Host not found"})
+		return
+	}
 	hostName := req.HostID
-	if host, err := h.hosts.GetByID(r.Context(), req.HostID); err == nil && host != nil {
-		if host.FriendlyName != "" {
-			hostName = host.FriendlyName
-		} else if host.Hostname != nil && *host.Hostname != "" {
-			hostName = *host.Hostname
-		}
+	if host.FriendlyName != "" {
+		hostName = host.FriendlyName
+	} else if host.Hostname != nil && *host.Hostname != "" {
+		hostName = *host.Hostname
 	}
 
 	// Fail-closed: no audit row, no ticket.
@@ -64,7 +73,7 @@ func (h *SshTicketHandler) ServeCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ticket, err := h.tickets.CreateTicket(r.Context(), userID, req.HostID)
+	ticket, err := h.tickets.CreateTicket(r.Context(), userID, host.ID)
 	if err != nil {
 		JSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to generate SSH ticket"})
 		return
