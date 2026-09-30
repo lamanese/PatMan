@@ -386,16 +386,20 @@ func TestApplyAfterDiscardReturnsNoPending(t *testing.T) {
 	}
 }
 
-// discardDuringAudit simulates a concurrent Discard that wins between Apply's
-// read of the pending row and its claim: the audit write (the only step in
-// between that touches h.db) deletes the row first.
-type discardDuringAudit struct {
+// discardBeforeClaim simulates a concurrent Discard that wins between Apply's
+// read of the pending row and its claim: the pending store's second DB access
+// (the claim) deletes the row first.
+type discardBeforeClaim struct {
 	d      *database.DB
 	hostID string
+	calls  *int
 }
 
-func (p discardDuringAudit) DB(ctx context.Context) *database.DB {
-	_, _ = p.d.Exec(ctx, `DELETE FROM host_pending_config WHERE host_id = $1`, p.hostID)
+func (p discardBeforeClaim) DB(ctx context.Context) *database.DB {
+	*p.calls++
+	if *p.calls == 2 {
+		_, _ = p.d.Exec(ctx, `DELETE FROM host_pending_config WHERE host_id = $1`, p.hostID)
+	}
 	return p.d
 }
 
@@ -405,7 +409,8 @@ func TestApplyReturns409WhenClaimLoses(t *testing.T) {
 	h := hostsAuditTestHandler(d)
 	h.registry = registryWithAgent(hostID)
 	createPendingDocker(t, h, d, hostID, true)
-	h.db = discardDuringAudit{d: d, hostID: hostID}
+	calls := 0
+	h.pendingConfig = store.NewPendingConfigStore(discardBeforeClaim{d: d, hostID: hostID, calls: &calls})
 	w := httptest.NewRecorder()
 	h.ApplyPendingConfig(w, applyRequest(hostID, "user-3"))
 	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), `"code":"pending_config_gone"`) ||
@@ -418,6 +423,26 @@ func TestApplyReturns409WhenClaimLoses(t *testing.T) {
 	}
 	if got := pendingConfigRows(t, d, hostID); got != 0 {
 		t.Fatalf("pending config rows=%d, want 0", got)
+	}
+	if got := auditRows(t, d, "integration_config_applied", hostID); got != 0 {
+		t.Fatalf("applied audit rows=%d, want 0 (the loser writes no audit row)", got)
+	}
+}
+
+func TestApplyAuditFailureRestoresPending(t *testing.T) {
+	d := newHandlerTestDB(t)
+	hostID := insertSolvedTestHost(t, d, "web01")
+	h := hostsAuditTestHandler(d)
+	h.registry = registryWithAgent(hostID)
+	createPendingDocker(t, h, d, hostID, true)
+	h.db = fakeProvider{nil} // audit write fails, pending store stays real
+	w := httptest.NewRecorder()
+	h.ApplyPendingConfig(w, applyRequest(hostID, "user-3"))
+	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "Failed to write audit log") {
+		t.Fatalf("status=%d body=%s, want 500 audit failure", w.Code, w.Body.String())
+	}
+	if v := pendingDocker(t, d, hostID); v == nil || !*v {
+		t.Fatalf("pending docker_enabled=%v, want true (unchanged)", v)
 	}
 }
 

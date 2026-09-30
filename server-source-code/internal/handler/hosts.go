@@ -1539,6 +1539,8 @@ func (h *HostsHandler) ApplyPendingConfig(w http.ResponseWriter, r *http.Request
 		Error(w, http.StatusServiceUnavailable, "Agent is not connected. Ensure the agent's server_url in config.yml points to this server.")
 		return
 	}
+	// This read only separates "nothing pending" (400) from "lost the claim
+	// to a concurrent Apply/Discard" (409); the values come from the claim.
 	pending, err := h.pendingConfig.GetPendingConfig(r.Context(), hostID)
 	if err != nil {
 		Error(w, http.StatusInternalServerError, "Failed to load pending config")
@@ -1549,21 +1551,9 @@ func (h *HostsHandler) ApplyPendingConfig(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// The audit row describes the change as read above; the values sent to
-	// the agent are recomputed from the claimed row below.
-	preview := mergePendingConfig(host, pending)
-	if err := h.writeAuditLog(r, "integration_config_applied", true, map[string]interface{}{
-		"host_id": host.ID, "host_name": host.FriendlyName,
-		"docker": preview.docker, "compliance": preview.complianceValue(),
-		"openscap_enabled": preview.openscap, "docker_bench_enabled": preview.dockerBench,
-	}); err != nil {
-		slog.Error("refusing apply-pending-config: audit log write failed", "host_id", hostID, "error", err)
-		Error(w, http.StatusInternalServerError, "Failed to write audit log")
-		return
-	}
-	// Claim the pending row atomically. A concurrent Discard (or a second
-	// Apply) that got there first leaves nothing to claim: answer 409 and
-	// never send the config to the agent.
+	// Claim the pending row atomically before anything else. A concurrent
+	// Discard (or a second Apply) that got there first leaves nothing to
+	// claim: answer 409, write no audit row and never contact the agent.
 	claimed, err := h.pendingConfig.ClaimPendingConfig(r.Context(), hostID)
 	if err != nil {
 		slog.Error("apply-pending-config: claim failed", "host_id", hostID, "error", err)
@@ -1579,6 +1569,17 @@ func (h *HostsHandler) ApplyPendingConfig(w http.ResponseWriter, r *http.Request
 		return
 	}
 	cfg := mergePendingConfig(host, claimed)
+	if err := h.writeAuditLog(r, "integration_config_applied", true, map[string]interface{}{
+		"host_id": host.ID, "host_name": host.FriendlyName,
+		"docker": cfg.docker, "compliance": cfg.complianceValue(),
+		"openscap_enabled": cfg.openscap, "docker_bench_enabled": cfg.dockerBench,
+	}); err != nil {
+		slog.Error("refusing apply-pending-config: audit log write failed", "host_id", hostID, "error", err)
+		// Fail closed: nothing was sent, so the pending change stays in place.
+		h.restorePendingConfig(r.Context(), hostID, claimed)
+		Error(w, http.StatusInternalServerError, "Failed to write audit log")
+		return
+	}
 	msg := map[string]interface{}{
 		"type": "apply_config",
 		"config": map[string]interface{}{
@@ -1718,7 +1719,8 @@ func (c mergedIntegrationConfig) complianceValue() interface{} {
 }
 
 // restorePendingConfig puts a claimed pending row back (best effort) after a
-// step that must not consume it failed.
+// step that must not consume it failed. Known edge: a toggle stored between
+// the claim and this restore is overwritten by the claimed values (upsert).
 func (h *HostsHandler) restorePendingConfig(ctx context.Context, hostID string, pc *db.HostPendingConfig) {
 	if err := h.pendingConfig.SetPendingConfig(ctx, hostID, store.PendingConfigFields{
 		DockerEnabled:                pc.DockerEnabled,
