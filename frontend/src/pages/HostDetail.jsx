@@ -66,6 +66,7 @@ import {
 import { complianceAPI } from "../utils/complianceApi";
 import { OSIcon } from "../utils/osIcons.jsx";
 import { patchingAPI } from "../utils/patchingApi";
+import { isRemoteAccessEnabled } from "../utils/remoteAccess";
 import AgentQueueTab from "./hostdetail/AgentQueueTab";
 import CredentialsModal from "./hostdetail/CredentialsModal";
 import DeleteConfirmationModal from "./hostdetail/DeleteConfirmationModal";
@@ -98,9 +99,6 @@ const HostDetail = () => {
 	const queryClient = useQueryClient();
 	const toast = useToast();
 	const { canManageHosts, canUseRemoteAccess, hasModule } = useAuth();
-	// Terminal/RDP are only offered with can_use_remote_access; the server
-	// enforces the same permission on the ticket endpoints.
-	const remoteAccessAllowed = canUseRemoteAccess();
 	const [showCredentialsModal, setShowCredentialsModal] = useState(false);
 
 	// Get plaintext API key from navigation state (only available immediately after host creation)
@@ -221,6 +219,11 @@ const HostDetail = () => {
 		},
 	});
 
+	// Terminal/RDP need can_use_remote_access AND the server flag
+	// PM_ENABLE_REMOTE_ACCESS (read fail-closed); the server enforces both.
+	const remoteAccessAllowed =
+		canUseRemoteAccess() && isRemoteAccessEnabled(settings);
+
 	// WebSocket connection status using polling (secure - uses httpOnly cookies)
 	const [wsStatus, setWsStatus] = useState(null);
 
@@ -281,26 +284,24 @@ const HostDetail = () => {
 	// Open requested tab when navigating with state (e.g. from Compliance page link)
 	useEffect(() => {
 		const requestedTab = location.state?.tab;
-		if (
-			requestedTab &&
-			[
-				"host",
-				"network",
-				"system",
-				"history",
-				"queue",
-				"notes",
-				"integrations",
-				"reporting",
-				"docker",
-				"compliance",
-				"terminal",
-				"rdp",
-			].includes(requestedTab)
-		) {
+		const allowedTabs = [
+			"host",
+			"network",
+			"system",
+			"history",
+			"queue",
+			"notes",
+			"integrations",
+			"reporting",
+			"docker",
+			"compliance",
+			"terminal",
+			"rdp",
+		].filter((t) => remoteAccessAllowed || (t !== "terminal" && t !== "rdp"));
+		if (requestedTab && allowedTabs.includes(requestedTab)) {
 			setActiveTab(requestedTab);
 		}
-	}, [location.state?.tab]);
+	}, [location.state?.tab, remoteAccessAllowed]);
 
 	// Auto-show credentials modal for new/pending hosts (skip if just arrived from Add Host wizard)
 	useEffect(() => {
@@ -3722,9 +3723,14 @@ const HostDetail = () => {
 								/>
 							</div>
 						)}
-						{activeTab === "terminal" && !hasModule("ssh_terminal") && (
-							<UpgradeRequiredContent module="ssh_terminal" variant="inline" />
-						)}
+						{remoteAccessAllowed &&
+							activeTab === "terminal" &&
+							!hasModule("ssh_terminal") && (
+								<UpgradeRequiredContent
+									module="ssh_terminal"
+									variant="inline"
+								/>
+							)}
 
 						{/* RDP - Windows hosts only. Gated by the rdp module (Max tier). */}
 						{host &&
@@ -3735,9 +3741,12 @@ const HostDetail = () => {
 									<RdpViewer host={host} isOpen={activeTab === "rdp"} />
 								</div>
 							)}
-						{activeTab === "rdp" && isWindowsHost && !hasModule("rdp") && (
-							<UpgradeRequiredContent module="rdp" variant="inline" />
-						)}
+						{remoteAccessAllowed &&
+							activeTab === "rdp" &&
+							isWindowsHost &&
+							!hasModule("rdp") && (
+								<UpgradeRequiredContent module="rdp" variant="inline" />
+							)}
 
 						{/* Notes */}
 						{activeTab === "notes" && (
