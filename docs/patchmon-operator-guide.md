@@ -4947,7 +4947,7 @@ Enables browser-based SSH terminal sessions proxied through the PatchMon agent. 
 
 For these reasons, `ssh-proxy-enabled` **cannot be toggled from the PatchMon UI or pushed from the server**. If the server attempts to initiate an SSH proxy session while this is disabled, the agent rejects the request and returns an error message explaining how to enable it.
 
-> **amanIT PatMan, agent 2.0.21 and later:** the agent also **refuses** this key when a server sends it (integration toggle, startup sync, `apply_config`); only `docker` and `compliance` are server-managed. The proxy only ever connects to `localhost` on the host itself; a host name sent by the server is ignored, so the agent can never be used to reach other machines in the network behind it. The server side is additionally off unless it runs with `PM_ENABLE_REMOTE_ACCESS=true`.
+> **amanIT PatMan, agent 2.0.21 and later:** the agent also **refuses** this key when a server sends it (integration toggle, startup sync, `apply_config`); only `docker` and `compliance` are server-managed. The proxy only ever connects to `localhost` on the host itself; a host name sent by the server is ignored, so the proxy itself cannot be used to reach other machines in the network behind it. This protects against a misconfigured or partly compromised server; a fully compromised server could still replace the agent binary through the self-update mechanism (see the security backlog). The server side is additionally off unless it runs with `PM_ENABLE_REMOTE_ACCESS=true`.
 
 ##### How to Enable SSH Proxy
 
@@ -4994,7 +4994,7 @@ Set `ssh-proxy-enabled` back to `false` in `config.yml` and restart the agent se
 | **Default** | `false` |
 | **Server-pushable** | No (manual edit required) |
 
-Enables browser-based RDP (Remote Desktop Protocol) sessions proxied through the PatchMon agent. When a user opens the RDP tab for a Windows host in the PatchMon UI, the server sends the RDP connection request to the agent via WebSocket, and the agent establishes a local RDP connection (`localhost`, port default 3389) on behalf of the user via `guacd` (Apache Guacamole) running on the PatchMon server.
+Enables browser-based RDP (Remote Desktop Protocol) sessions proxied through the PatchMon agent. When a user opens the RDP tab for a Windows host in the PatchMon UI, the server sends the RDP connection request to the agent via WebSocket, and the agent establishes a local RDP connection (always `localhost:3389`; host and port sent by the server are ignored, agent 2.0.21+) on behalf of the user via `guacd` (Apache Guacamole) running on the PatchMon server.
 
 ##### Why RDP Proxy Requires Manual Configuration
 
@@ -5006,7 +5006,7 @@ Enables browser-based RDP (Remote Desktop Protocol) sessions proxied through the
 
 For these reasons, `rdp-proxy-enabled` **cannot be toggled from the PatchMon UI or pushed from the server**. If the server attempts to initiate an RDP proxy session while this is disabled, the agent rejects the request and returns an error message explaining how to enable it.
 
-> **amanIT PatMan, agent 2.0.21 and later:** as with the SSH proxy, the agent refuses `rdp-proxy-enabled` when a server sends it, and the RDP proxy only ever connects to `localhost` (port from the session, default 3389); a host name sent by the server is ignored. The server side is additionally off unless it runs with `PM_ENABLE_REMOTE_ACCESS=true`.
+> **amanIT PatMan, agent 2.0.21 and later:** as with the SSH proxy, the agent refuses `rdp-proxy-enabled` when a server sends it, and the RDP proxy always connects to `localhost:3389`; host and port sent by the server are ignored (agent 2.0.21+). The server side is additionally off unless it runs with `PM_ENABLE_REMOTE_ACCESS=true`.
 
 ##### Prerequisites
 
