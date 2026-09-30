@@ -477,3 +477,21 @@ func TestDiscardRestoresPendingWhenAuditFails(t *testing.T) {
 		t.Fatalf("pending docker_enabled=%v, want true (unchanged)", v)
 	}
 }
+
+func TestRestorePendingConfigSurvivesCancelledRequest(t *testing.T) {
+	d := newHandlerTestDB(t)
+	hostID := insertSolvedTestHost(t, d, "web01")
+	h := hostsAuditTestHandler(d)
+	createPendingDocker(t, h, d, hostID, true)
+	claimed, err := h.pendingConfig.ClaimPendingConfig(context.Background(), hostID)
+	if err != nil || claimed == nil {
+		t.Fatalf("claim=%+v err=%v", claimed, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := applyRequest(hostID, "user-3").WithContext(ctx)
+	h.restorePendingConfig(r, hostID, claimed)
+	if v := pendingDocker(t, d, hostID); v == nil || !*v {
+		t.Fatalf("restored docker_enabled=%v, want true", v)
+	}
+}

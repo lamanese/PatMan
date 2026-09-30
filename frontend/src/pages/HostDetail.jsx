@@ -977,10 +977,15 @@ const HostDetail = () => {
 	const discardPendingConfigMutation = useMutation({
 		mutationFn: () =>
 			adminHostsAPI.discardPendingConfig(hostId).then((res) => res.data),
-		onSuccess: () => {
+		onSuccess: (data) => {
 			queryClient.invalidateQueries(["host-integrations", hostId]);
 			refetchIntegrations();
 			setShowApplyConfigModal(false);
+			// 200 without a claimed row: someone else applied or discarded first.
+			if (data?.message === "No pending configuration") {
+				toast.info("No pending configuration to discard");
+				return;
+			}
 			toast.success("Pending configuration changes discarded.");
 		},
 		onError: (error) => {

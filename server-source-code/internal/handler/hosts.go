@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/PatchMon/PatchMon/server-source-code/internal/agentregistry"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/config"
@@ -1576,7 +1577,7 @@ func (h *HostsHandler) ApplyPendingConfig(w http.ResponseWriter, r *http.Request
 	}); err != nil {
 		slog.Error("refusing apply-pending-config: audit log write failed", "host_id", hostID, "error", err)
 		// Fail closed: nothing was sent, so the pending change stays in place.
-		h.restorePendingConfig(r.Context(), hostID, claimed)
+		h.restorePendingConfig(r, hostID, claimed)
 		Error(w, http.StatusInternalServerError, "Failed to write audit log")
 		return
 	}
@@ -1595,7 +1596,7 @@ func (h *HostsHandler) ApplyPendingConfig(w http.ResponseWriter, r *http.Request
 		slog.Error("apply-pending-config: failed to send to agent", "host_id", hostID, "api_id", host.ApiID, "error", err)
 		// The agent never got the config: put the claimed change back so it
 		// can be applied again or discarded.
-		h.restorePendingConfig(r.Context(), hostID, claimed)
+		h.restorePendingConfig(r, hostID, claimed)
 		Error(w, http.StatusServiceUnavailable, "Failed to send config to agent")
 		return
 	}
@@ -1661,7 +1662,7 @@ func (h *HostsHandler) DiscardPendingConfig(w http.ResponseWriter, r *http.Reque
 	if err := h.writeAuditLog(r, "integration_config_discarded", true, detail); err != nil {
 		slog.Error("refusing discard-pending-config: audit log write failed", "host_id", hostID, "error", err)
 		// Fail closed: without an audit row the pending change stays in place.
-		h.restorePendingConfig(r.Context(), hostID, claimed)
+		h.restorePendingConfig(r, hostID, claimed)
 		Error(w, http.StatusInternalServerError, "Failed to write audit log")
 		return
 	}
@@ -1721,7 +1722,11 @@ func (c mergedIntegrationConfig) complianceValue() interface{} {
 // restorePendingConfig puts a claimed pending row back (best effort) after a
 // step that must not consume it failed. Known edge: a toggle stored between
 // the claim and this restore is overwritten by the claimed values (upsert).
-func (h *HostsHandler) restorePendingConfig(ctx context.Context, hostID string, pc *db.HostPendingConfig) {
+// It runs on a detached context: a request cancelled after the claim must not
+// lose the pending change together with the failed audit or send.
+func (h *HostsHandler) restorePendingConfig(r *http.Request, hostID string, pc *db.HostPendingConfig) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+	defer cancel()
 	if err := h.pendingConfig.SetPendingConfig(ctx, hostID, store.PendingConfigFields{
 		DockerEnabled:                pc.DockerEnabled,
 		ComplianceEnabled:            pc.ComplianceEnabled,
