@@ -141,27 +141,7 @@ func runServiceLoop(stopCh <-chan struct{}) error {
 	// Fetch integration status from server and sync with config.yml
 	logger.Info("Syncing integration status from server...")
 	if integrationResp, err := httpClient.GetIntegrationStatus(ctx); err == nil && integrationResp.Success {
-		configUpdated := false
-		for integrationName, serverEnabled := range integrationResp.Integrations {
-			configEnabled := cfgManager.IsIntegrationEnabled(integrationName)
-			if serverEnabled != configEnabled {
-				logger.WithFields(logutil.SanitizeMap(map[string]interface{}{
-					"integration":  integrationName,
-					"config_value": configEnabled,
-					"server_value": serverEnabled,
-				})).Info("Integration status differs, updating config.yml")
-
-				if err := cfgManager.SetIntegrationEnabled(integrationName, serverEnabled); err != nil {
-					logger.WithError(err).Warn("Failed to save integration status to config.yml")
-				} else {
-					configUpdated = true
-					logger.WithFields(logutil.SanitizeMap(map[string]interface{}{
-						"integration": integrationName,
-						"enabled":     serverEnabled,
-					})).Info("Updated integration status in config.yml")
-				}
-			}
-		}
+		configUpdated := syncIntegrationsFromServer(integrationResp.Integrations)
 
 		// Sync compliance scanner toggles from server (when server sends them)
 		if integrationResp.ComplianceOpenscapEnabled != nil || integrationResp.ComplianceDockerBenchEnabled != nil {
@@ -1913,6 +1893,10 @@ func connectOnce(out chan<- wsMsg, dockerEvents <-chan interface{}, backoff *tim
 				force:   payload.Force,
 			})
 		case "integration_toggle":
+			if !config.IsServerManagedIntegration(payload.Integration) {
+				logger.WithField("integration", logutil.Sanitize(payload.Integration)).Warn("Ignoring integration_toggle for local-only integration")
+				continue
+			}
 			logger.WithFields(logutil.SanitizeMap(map[string]interface{}{
 				"integration": payload.Integration,
 				"enabled":     payload.Enabled,
@@ -2043,16 +2027,9 @@ func connectOnce(out chan<- wsMsg, dockerEvents <-chan interface{}, backoff *tim
 				logger.Warn("SSH proxy request missing session_id")
 				continue
 			}
-			// Validate host
-			if err := validateSSHProxyHost(payload.Host); err != nil {
-				logger.WithError(err).WithField("host", payload.Host).Warn("Invalid SSH proxy host")
-				globalWsConnMu.RLock()
-				wsConn := globalWsConn
-				globalWsConnMu.RUnlock()
-				if wsConn != nil {
-					sendSSHProxyError(wsConn, payload.SessionID, fmt.Sprintf("Invalid host: %v", err))
-				}
-				continue
+			// The proxy only ever dials this machine; a server-sent host is ignored.
+			if payload.Host != "" && payload.Host != "localhost" {
+				logger.WithField("host", logutil.Sanitize(payload.Host)).Info("Ignoring server-sent SSH proxy host, proxy target is always localhost")
 			}
 			// Validate port
 			if payload.Port < 1 || payload.Port > 65535 {
@@ -2067,14 +2044,14 @@ func connectOnce(out chan<- wsMsg, dockerEvents <-chan interface{}, backoff *tim
 			}
 			logger.WithFields(logutil.SanitizeMap(map[string]interface{}{
 				"session_id": payload.SessionID,
-				"host":       payload.Host,
+				"host":       proxyTargetHost(payload.Host),
 				"port":       payload.Port,
 				"username":   payload.Username,
 			})).Info("ssh_proxy received")
 			dispatchWSMessage(out, wsMsg{
 				kind:               "ssh_proxy",
 				sshProxySessionID:  payload.SessionID,
-				sshProxyHost:       payload.Host,
+				sshProxyHost:       proxyTargetHost(payload.Host),
 				sshProxyPort:       payload.Port,
 				sshProxyUsername:   payload.Username,
 				sshProxyPassword:   payload.Password,
@@ -2136,20 +2113,11 @@ func connectOnce(out chan<- wsMsg, dockerEvents <-chan interface{}, backoff *tim
 				logger.Warn("rdp_proxy request missing session_id")
 				continue
 			}
-			rdpHost := payload.Host
-			if rdpHost == "" {
-				rdpHost = "localhost"
+			// The proxy only ever dials this machine; a server-sent host is ignored.
+			if payload.Host != "" && payload.Host != "localhost" {
+				logger.WithField("host", logutil.Sanitize(payload.Host)).Info("Ignoring server-sent RDP proxy host, proxy target is always localhost")
 			}
-			if err := validateSSHProxyHost(rdpHost); err != nil {
-				logger.WithError(err).WithField("host", logutil.Sanitize(payload.Host)).Warn("Invalid RDP proxy host")
-				globalWsConnMu.RLock()
-				wsConn := globalWsConn
-				globalWsConnMu.RUnlock()
-				if wsConn != nil {
-					sendRDPProxyError(wsConn, payload.SessionID, fmt.Sprintf("Invalid host: %v", err))
-				}
-				continue
-			}
+			rdpHost := proxyTargetHost(payload.Host)
 			port := payload.Port
 			if port < 1 || port > 65535 {
 				port = 3389
@@ -3052,7 +3020,7 @@ func applyConfig(cfg map[string]interface{}) error {
 	// Apply docker
 	if v, ok := cfg["docker"]; ok {
 		if b, ok := v.(bool); ok {
-			if err := cfgManager.SetIntegrationEnabled("docker", b); err != nil {
+			if err := cfgManager.SetIntegrationEnabledFromServer("docker", b); err != nil {
 				return fmt.Errorf("set docker: %w", err)
 			}
 			logger.WithField("enabled", b).Info("Docker integration updated")
@@ -3130,8 +3098,44 @@ func applyConfig(cfg map[string]interface{}) error {
 	return restartService("", "")
 }
 
+// syncIntegrationsFromServer copies server-managed integration states into
+// config.yml. Local-only keys (ssh/rdp proxy) are skipped with a warning
+// even if the server sends them. Returns true when something changed.
+func syncIntegrationsFromServer(serverState map[string]bool) bool {
+	changed := false
+	for name, serverEnabled := range serverState {
+		if !config.IsServerManagedIntegration(name) {
+			logger.WithField("integration", logutil.Sanitize(name)).Warn("Ignoring server-sent state for local-only integration")
+			continue
+		}
+		configEnabled := cfgManager.IsIntegrationEnabled(name)
+		if configEnabled == serverEnabled {
+			continue
+		}
+		logger.WithFields(logutil.SanitizeMap(map[string]interface{}{
+			"integration":  name,
+			"config_value": configEnabled,
+			"server_value": serverEnabled,
+		})).Info("Integration status differs, updating config.yml")
+		if err := cfgManager.SetIntegrationEnabledFromServer(name, serverEnabled); err != nil {
+			logger.WithError(err).WithField("integration", name).Warn("Failed to save integration status to config.yml")
+			continue
+		}
+		logger.WithFields(logutil.SanitizeMap(map[string]interface{}{
+			"integration": name,
+			"enabled":     serverEnabled,
+		})).Info("Updated integration status in config.yml")
+		changed = true
+	}
+	return changed
+}
+
 // toggleIntegration toggles an integration on or off and restarts the service
 func toggleIntegration(integrationName string, enabled bool) error {
+	if !config.IsServerManagedIntegration(integrationName) {
+		logger.WithField("integration", logutil.Sanitize(integrationName)).Warn("Refusing server-driven toggle of local-only integration")
+		return fmt.Errorf("%w: %q", config.ErrIntegrationNotServerManaged, integrationName)
+	}
 	logger.WithFields(logutil.SanitizeMap(map[string]interface{}{
 		"integration": integrationName,
 		"enabled":     enabled,
@@ -3434,7 +3438,7 @@ func toggleIntegration(integrationName string, enabled bool) error {
 	}
 
 	// Update config.yml
-	if err := cfgManager.SetIntegrationEnabled(integrationName, enabled); err != nil {
+	if err := cfgManager.SetIntegrationEnabledFromServer(integrationName, enabled); err != nil {
 		return fmt.Errorf("failed to update config: %w", err)
 	}
 
@@ -4021,21 +4025,10 @@ func runDockerImageScan(imageName, containerName string, scanAllImages bool) err
 	return nil
 }
 
-// validateSSHProxyHost validates SSH proxy host to prevent injection
-func validateSSHProxyHost(host string) error {
-	if host == "" {
-		return fmt.Errorf("host is required")
-	}
-	if len(host) > 255 {
-		return fmt.Errorf("host too long (max 255 chars)")
-	}
-	// Allow localhost, IP addresses, and valid hostnames
-	validHostPattern := regexp.MustCompile(`^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$|^localhost$|^(\d{1,3}\.){3}\d{1,3}$`)
-	if !validHostPattern.MatchString(host) {
-		return fmt.Errorf("invalid host format")
-	}
-	return nil
-}
+// proxyTargetHost is the only host the SSH/RDP proxy ever dials. The agent
+// relays to the machine it runs on, never into the network behind it; the
+// host the server sends is ignored on purpose.
+func proxyTargetHost(_ string) string { return "localhost" }
 
 // SSH proxy session management
 type sshProxySession struct {
@@ -4095,10 +4088,7 @@ func sendSSHProxyClosed(conn *websocket.Conn, sessionID string) {
 // handleSSHProxy establishes SSH connection and manages proxy session
 func handleSSHProxy(m wsMsg, conn *websocket.Conn) {
 	sessionID := m.sshProxySessionID
-	host := m.sshProxyHost
-	if host == "" {
-		host = "localhost"
-	}
+	host := proxyTargetHost(m.sshProxyHost)
 	port := m.sshProxyPort
 	if port == 0 {
 		port = 22
@@ -4462,10 +4452,7 @@ func sendRDPProxyClosed(conn *websocket.Conn, sessionID string) {
 
 func handleRDPProxy(m wsMsg, conn *websocket.Conn) {
 	sessionID := m.rdpProxySessionID
-	host := m.rdpProxyHost
-	if host == "" {
-		host = "localhost"
-	}
+	host := proxyTargetHost(m.rdpProxyHost)
 	port := m.rdpProxyPort
 	if port <= 0 {
 		port = 3389
