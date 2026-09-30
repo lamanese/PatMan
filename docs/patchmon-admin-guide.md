@@ -655,6 +655,7 @@ If there's a pending patch run awaiting a fresh post-patch report, you'll see an
 | Button | What it does | Requires agent online? |
 |--------|--------------|:---:|
 | **Apply** | Appears only when pending config changes (e.g. integration toggles) need to be pushed to the agent. | Yes |
+| **Discard changes** | Appears together with **Apply**; deletes the pending config changes on the server without contacting the agent. | No |
 | **Fetch Report** | Sends a WebSocket command asking the agent to collect and submit a fresh report now. | Yes |
 | **Patch all** | Opens the Patching wizard pre-scoped to this host. Hidden on Windows hosts. | Yes |
 | **Deploy Agent** (key icon) | Opens the Credentials modal with the install command and API credentials. | No |
@@ -2336,6 +2337,8 @@ The agent then:
 #### What "Pending configuration changes" means
 
 The toggle on the UI writes the **desired** state to the PatchMon server. The change is only actually sent to the agent when you click **Apply**, which broadcasts the new config over the WebSocket. If the agent is offline, **Apply** is disabled and the banner tells you so. The change waits in pending state until the agent reconnects.
+
+To throw pending changes away instead, click **Discard changes** (in the page header, in the pending banner of the **Integrations** tab or in the Apply dialog). This only deletes the pending state on the server; nothing is sent to the agent, so it also works while the agent is offline. The host keeps its current integration settings, and the discard is recorded in the audit log (`integration_config_discarded`).
 
 You'll see `integrations.docker` change in the agent's `config.yml` shortly after **Apply** is clicked, without needing to restart the service (the update interval and integration toggles are synced at runtime).
 
@@ -4857,6 +4860,8 @@ Besides the login and user-management events, amanIT PatMan writes an `audit_log
 | `agent_update_forced` | A user forces an agent update on a host |
 | `integration_toggle_requested` | A user enables or disables an agent integration (docker, compliance) |
 | `integration_config_applied` | A user pushes an integration configuration to an agent |
+| `integration_config_discarded` | A user discards pending integration changes with **Discard changes** (nothing is sent to the agent; the row lists the discarded values) |
+| `compliance_config_requested` | A user changes the compliance mode, the scanners or the default profile of a host (`change` = `mode`, `scanners` or `default_profile`) |
 | `compliance_remediation_requested` | A user requests remediation of a compliance finding |
 | `compliance_scan_triggered` | A user triggers a compliance scan with remediation enabled (plain scans are not audited) |
 | `ssh_ticket_issued` | A user obtains a one-time ticket for the Web SSH Terminal |

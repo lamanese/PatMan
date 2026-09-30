@@ -1322,6 +1322,13 @@ func (h *HostsHandler) SetComplianceMode(w http.ResponseWriter, r *http.Request)
 	}
 	complianceEnabled := req.Mode != "disabled"
 	complianceOnDemandOnly := req.Mode == "on-demand"
+	if err := h.writeAuditLog(r, "compliance_config_requested", true, map[string]interface{}{
+		"host_id": host.ID, "host_name": host.FriendlyName, "change": "mode", "mode": req.Mode,
+	}); err != nil {
+		slog.Error("refusing compliance mode change: audit log write failed", "host_id", hostID, "error", err)
+		Error(w, http.StatusInternalServerError, "Failed to write audit log")
+		return
+	}
 	if err := h.pendingConfig.SetPendingConfig(r.Context(), hostID, store.PendingConfigFields{
 		ComplianceEnabled:      &complianceEnabled,
 		ComplianceOnDemandOnly: &complianceOnDemandOnly,
@@ -1374,6 +1381,18 @@ func (h *HostsHandler) SetComplianceScanners(w http.ResponseWriter, r *http.Requ
 	if req.DockerBenchEnabled != nil {
 		fields.ComplianceDockerBenchEnabled = req.DockerBenchEnabled
 	}
+	auditDetail := map[string]interface{}{"host_id": existing.ID, "host_name": existing.FriendlyName, "change": "scanners"}
+	if req.OpenscapEnabled != nil {
+		auditDetail["openscap_enabled"] = *req.OpenscapEnabled
+	}
+	if req.DockerBenchEnabled != nil {
+		auditDetail["docker_bench_enabled"] = *req.DockerBenchEnabled
+	}
+	if err := h.writeAuditLog(r, "compliance_config_requested", true, auditDetail); err != nil {
+		slog.Error("refusing compliance scanner change: audit log write failed", "host_id", hostID, "error", err)
+		Error(w, http.StatusInternalServerError, "Failed to write audit log")
+		return
+	}
 	if err := h.pendingConfig.SetPendingConfig(r.Context(), hostID, fields); err != nil {
 		Error(w, http.StatusInternalServerError, "Failed to store pending scanner settings")
 		return
@@ -1408,6 +1427,19 @@ func (h *HostsHandler) SetComplianceDefaultProfile(w http.ResponseWriter, r *htt
 	existing, err := h.hosts.GetByID(r.Context(), hostID)
 	if err != nil || existing == nil {
 		Error(w, http.StatusNotFound, "Host not found")
+		return
+	}
+	// Unlike mode/scanners this writes the hosts table directly (no pending
+	// step), so the audit row is the only record of who changed it.
+	var auditProfile interface{}
+	if req.ProfileID != nil {
+		auditProfile = auditText(*req.ProfileID)
+	}
+	if err := h.writeAuditLog(r, "compliance_config_requested", true, map[string]interface{}{
+		"host_id": existing.ID, "host_name": existing.FriendlyName, "change": "default_profile", "profile_id": auditProfile,
+	}); err != nil {
+		slog.Error("refusing compliance default profile change: audit log write failed", "host_id", hostID, "error", err)
+		Error(w, http.StatusInternalServerError, "Failed to write audit log")
 		return
 	}
 	if err := h.hosts.UpdateComplianceDefaultProfile(r.Context(), hostID, req.ProfileID); err != nil {
@@ -1596,6 +1628,55 @@ func (h *HostsHandler) ApplyPendingConfig(w http.ResponseWriter, r *http.Request
 	JSON(w, http.StatusOK, map[string]interface{}{
 		"success": true,
 		"message": "Configuration applied successfully",
+	})
+}
+
+// DiscardPendingConfig handles DELETE /hosts/:hostId/integrations/pending-config.
+// Drops the stored pending integration changes without contacting the agent.
+// Idempotent: without pending changes it answers 200 and writes no audit row.
+// With pending changes the audit row is written first (fail-closed).
+func (h *HostsHandler) DiscardPendingConfig(w http.ResponseWriter, r *http.Request) {
+	hostID := chi.URLParam(r, "hostId")
+	host, ok := h.requireHost(w, r, hostID)
+	if !ok {
+		return
+	}
+	pending, err := h.pendingConfig.GetPendingConfig(r.Context(), hostID)
+	if err != nil {
+		Error(w, http.StatusInternalServerError, "Failed to load pending config")
+		return
+	}
+	if pending == nil {
+		JSON(w, http.StatusOK, map[string]interface{}{
+			"success": true,
+			"message": "No pending configuration",
+		})
+		return
+	}
+	detail := map[string]interface{}{"host_id": host.ID, "host_name": host.FriendlyName}
+	for key, val := range map[string]*bool{
+		"docker":                    pending.DockerEnabled,
+		"compliance":                pending.ComplianceEnabled,
+		"compliance_on_demand_only": pending.ComplianceOnDemandOnly,
+		"openscap_enabled":          pending.ComplianceOpenscapEnabled,
+		"docker_bench_enabled":      pending.ComplianceDockerBenchEnabled,
+	} {
+		if val != nil {
+			detail[key] = *val
+		}
+	}
+	if err := h.writeAuditLog(r, "integration_config_discarded", true, detail); err != nil {
+		slog.Error("refusing discard-pending-config: audit log write failed", "host_id", hostID, "error", err)
+		Error(w, http.StatusInternalServerError, "Failed to write audit log")
+		return
+	}
+	if err := h.pendingConfig.ClearPendingConfig(r.Context(), hostID); err != nil {
+		Error(w, http.StatusInternalServerError, "Failed to clear pending config")
+		return
+	}
+	JSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"message": "Pending configuration discarded",
 	})
 }
 

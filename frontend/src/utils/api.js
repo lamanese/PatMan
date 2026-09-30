@@ -171,6 +171,8 @@ export const adminHostsAPI = {
 		api.post(`/hosts/${hostId}/integrations/compliance/scanners`, settings),
 	applyPendingConfig: (hostId) =>
 		api.post(`/hosts/${hostId}/integrations/apply-pending-config`),
+	discardPendingConfig: (hostId) =>
+		api.delete(`/hosts/${hostId}/integrations/pending-config`),
 	setComplianceOnDemandOnly: (hostId, onDemandOnly) =>
 		api.post(`/hosts/${hostId}/compliance/on-demand-only`, {
 			on_demand_only: onDemandOnly,

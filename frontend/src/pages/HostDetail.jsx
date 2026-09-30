@@ -964,6 +964,26 @@ const HostDetail = () => {
 		},
 	});
 
+	// Discard pending config mutation (server-only, agent need not be connected)
+	const discardPendingConfigMutation = useMutation({
+		mutationFn: () =>
+			adminHostsAPI.discardPendingConfig(hostId).then((res) => res.data),
+		onSuccess: () => {
+			queryClient.invalidateQueries(["host-integrations", hostId]);
+			refetchIntegrations();
+			setShowApplyConfigModal(false);
+			toast.success("Pending configuration changes discarded.");
+		},
+		onError: (error) => {
+			refetchIntegrations();
+			const msg =
+				error.response?.data?.error ||
+				error.response?.data?.message ||
+				error.message;
+			toast.error(`Failed to discard: ${msg}`);
+		},
+	});
+
 	// Set compliance mode mutation (three-state: disabled, on-demand, enabled)
 	const setComplianceModeMutation = useMutation({
 		mutationFn: (mode) =>
@@ -1347,6 +1367,18 @@ const HostDetail = () => {
 						>
 							<Send className="h-4 w-4" />
 							<span className="hidden sm:inline">Apply</span>
+						</button>
+					)}
+					{integrationsData?.pending_config_exists && (
+						<button
+							type="button"
+							onClick={() => discardPendingConfigMutation.mutate()}
+							disabled={discardPendingConfigMutation.isPending}
+							className="btn-outline flex items-center gap-2 text-sm whitespace-nowrap"
+							title="Discard pending configuration changes (nothing is sent to the agent)"
+						>
+							<RotateCcw className="h-4 w-4" />
+							<span className="hidden sm:inline">Discard changes</span>
 						</button>
 					)}
 					<div className="flex-1 min-w-0 flex items-center gap-2 flex-wrap">
@@ -3883,6 +3915,16 @@ const HostDetail = () => {
 														configuration changes
 													</p>
 												)}
+												<button
+													type="button"
+													onClick={() => discardPendingConfigMutation.mutate()}
+													disabled={discardPendingConfigMutation.isPending}
+													className="btn-outline mt-3 flex items-center gap-2 text-sm whitespace-nowrap"
+													title="Discard pending configuration changes (nothing is sent to the agent)"
+												>
+													<RotateCcw className="h-4 w-4" />
+													Discard changes
+												</button>
 											</div>
 										)}
 										<div className="grid grid-cols-1 gap-4">
@@ -6278,6 +6320,24 @@ const HostDetail = () => {
 								className="px-4 py-2 text-sm font-medium text-secondary-700 dark:text-secondary-200 bg-white dark:bg-secondary-600 border border-secondary-300 dark:border-secondary-500 rounded-md hover:bg-secondary-50 dark:hover:bg-secondary-500 transition-colors"
 							>
 								Cancel
+							</button>
+							<button
+								type="button"
+								onClick={() => discardPendingConfigMutation.mutate()}
+								disabled={discardPendingConfigMutation.isPending}
+								className="px-4 py-2 text-sm font-medium text-secondary-700 dark:text-secondary-200 bg-white dark:bg-secondary-600 border border-secondary-300 dark:border-secondary-500 rounded-md hover:bg-secondary-50 dark:hover:bg-secondary-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+							>
+								{discardPendingConfigMutation.isPending ? (
+									<>
+										<Loader2 className="h-4 w-4 animate-spin" />
+										Discarding...
+									</>
+								) : (
+									<>
+										<RotateCcw className="h-4 w-4" />
+										Discard changes
+									</>
+								)}
 							</button>
 							<button
 								type="button"
