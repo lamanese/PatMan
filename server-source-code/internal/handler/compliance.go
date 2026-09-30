@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"github.com/PatchMon/PatchMon/server-source-code/internal/agentregistry"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/alerts"
 	hostctx "github.com/PatchMon/PatchMon/server-source-code/internal/context"
+	"github.com/PatchMon/PatchMon/server-source-code/internal/database"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/models"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/notifications"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/queue"
@@ -38,6 +40,17 @@ type ComplianceHandler struct {
 	integrationStatus *store.IntegrationStatusStore
 	ssgContentDir     string
 	notify            *notifications.Emitter
+	db                database.DBProvider
+}
+
+// SetDB wires the database for audit writes (router.go).
+func (h *ComplianceHandler) SetDB(p database.DBProvider) { h.db = p }
+
+func (h *ComplianceHandler) writeAudit(r *http.Request, event string, detail map[string]interface{}) error {
+	if h.db == nil {
+		return errors.New("audit: no database")
+	}
+	return auditFromRequest(r, h.db.DB(r.Context()), event, detail)
 }
 
 // NewComplianceHandler creates a new compliance handler.
@@ -830,6 +843,21 @@ func (h *ComplianceHandler) TriggerScan(w http.ResponseWriter, r *http.Request) 
 	if req.ProfileType != "" {
 		profileType = req.ProfileType
 	}
+	// Only scans that may change the host are audited; plain scans are read-only.
+	if req.EnableRemediation {
+		var profileID interface{}
+		if req.ProfileID != nil {
+			profileID = auditText(*req.ProfileID)
+		}
+		if err := h.writeAudit(r, "compliance_scan_triggered", map[string]interface{}{
+			"host_id": hostID, "host_name": host.FriendlyName, "profile": auditText(profileType),
+			"profile_id": profileID, "enable_remediation": true,
+		}); err != nil {
+			slog.Error("refusing remediating scan: audit log write failed", "error", err)
+			Error(w, http.StatusInternalServerError, "Failed to write audit log")
+			return
+		}
+	}
 	if h.integrationStatus != nil {
 		_ = h.integrationStatus.ClearComplianceScanCancel(r.Context(), hostID)
 	}
@@ -1245,6 +1273,15 @@ func (h *ComplianceHandler) RemediateRule(w http.ResponseWriter, r *http.Request
 	host, err := h.hostsStore.GetByID(r.Context(), hostID)
 	if err != nil || host == nil {
 		Error(w, http.StatusNotFound, "Host not found")
+		return
+	}
+	// Audit the request before any agent contact (fail-closed); the row records
+	// the attempt, not the outcome.
+	if err := h.writeAudit(r, "compliance_remediation_requested", map[string]interface{}{
+		"host_id": hostID, "host_name": host.FriendlyName, "rule_id": auditText(req.RuleID),
+	}); err != nil {
+		slog.Error("refusing remediation: audit log write failed", "error", err)
+		Error(w, http.StatusInternalServerError, "Failed to write audit log")
 		return
 	}
 	if !h.registry.IsConnected(host.ApiID) {

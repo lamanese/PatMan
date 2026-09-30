@@ -14,6 +14,7 @@ import (
 	"github.com/PatchMon/PatchMon/server-source-code/internal/agentregistry"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/ai"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/auth/oidc"
+	"github.com/PatchMon/PatchMon/server-source-code/internal/clientip"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/config"
 	hostctx "github.com/PatchMon/PatchMon/server-source-code/internal/context"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/database"
@@ -28,7 +29,6 @@ import (
 	"github.com/PatchMon/PatchMon/server-source-code/internal/swagger"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/util"
 	"github.com/go-chi/chi/v5"
-	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/hibiken/asynq"
 	redisclient "github.com/redis/go-redis/v9"
 	httpSwagger "github.com/swaggo/http-swagger"
@@ -68,9 +68,20 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 	}
 	r.Use(middleware.CORS(resolved.CORSOrigin, corsOriginResolver(ctxRegistry)))
 	if resolved.TrustProxy {
-		r.Use(chimw.RealIP)
+		// Resolve the client IP from X-Forwarded-For before anything that keys
+		// on it (rate limiting, API auth, login lockout, audit logging). Must
+		// not use chi's RealIP: it takes the leftmost entry, which is whatever
+		// the client sent, so callers could pick their own rate-limit bucket.
+		trustedProxies, invalid := clientip.ParseTrustedProxies(resolved.TrustedProxyRanges)
+		if len(invalid) > 0 && log != nil {
+			// slog quotes string values, so a malformed entry cannot break the
+			// log line. These come from the operator's env, not from requests.
+			log.Warn("ignoring invalid TRUSTED_PROXY_RANGES entries",
+				"entries", strings.Join(invalid, ", "))
+		}
+		r.Use(middleware.RealIP(trustedProxies))
 	}
-	// Note: chimw.Timeout is NOT applied globally because it conflicts with
+	// Note: chi's Timeout middleware is NOT applied globally because it conflicts with
 	// WebSocket/SSE routes (hijacked connections). It writes a 503 to a
 	// hijacked ResponseWriter causing "WriteHeader on hijacked connection".
 	// Instead, timeout is applied per-group below, skipping WS routes.
@@ -107,7 +118,7 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 	}
 	releaseNotesAcceptanceStore := store.NewReleaseNotesAcceptanceStore(dbProvider)
 	trustedDevicesStore := store.NewTrustedDevicesStore(dbProvider)
-	authHandler := handler.NewAuthHandler(cfg, resolved, usersStore, store.NewSessionsStore(dbProvider), trustedDevicesStore, settingsStore, tfaLockout, loginLockout, releaseNotesAcceptanceStore, dbProvider, notifyEmit, log).WithPermissions(permissionsStore)
+	authHandler := handler.NewAuthHandler(cfg, resolved, usersStore, store.NewSessionsStore(dbProvider), trustedDevicesStore, settingsStore, tfaLockout, loginLockout, store.NewPendingLoginStore(redisResolver), releaseNotesAcceptanceStore, dbProvider, notifyEmit, log).WithPermissions(permissionsStore)
 	var oidcHandler *handler.OidcHandler
 	if rdb != nil {
 		oidcResolved, _ := config.ResolveOidcConfig(ctx, cfg, settingsStore.GetFirst)
@@ -151,13 +162,16 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 	hostsStore := store.NewHostsStore(dbProvider)
 	billingHandler := handler.NewBillingHandler(cfg, log, hostsStore)
 	metricsHandler := handler.NewMetricsHandler(settingsStore, hostsStore, cfg)
+	licenseHandler := handler.NewLicenseHandler(settingsStore, hostsStore, cfg, dbProvider)
 	hostGroupsStore := store.NewHostGroupsStore(dbProvider)
 	var integrationStatusStore *store.IntegrationStatusStore
 	if rdb != nil {
 		integrationStatusStore = store.NewIntegrationStatusStore(redisResolver)
 	}
 	pendingConfigStore := store.NewPendingConfigStore(dbProvider)
-	hostsHandler := handler.NewHostsHandler(hostsStore, hostGroupsStore, settingsStore, queueClient, registry, integrationStatusStore, pendingConfigStore, dbProvider, notifyEmit)
+	hostsHandler := handler.NewHostsHandler(hostsStore, hostGroupsStore, settingsStore, queueClient, registry, integrationStatusStore, pendingConfigStore, dbProvider, notifyEmit, cfg)
+	rebootSchedulesHandler := handler.NewRebootSchedulesHandler(dbProvider)
+	patchSchedulesHandler := handler.NewPatchSchedulesHandler(dbProvider)
 	packagesHandler := handler.NewPackagesHandler(store.NewPackagesStore(dbProvider))
 	repositoriesHandler := handler.NewRepositoriesHandler(store.NewRepositoriesStore(dbProvider))
 	dockerStore := store.NewDockerStore(dbProvider)
@@ -169,6 +183,8 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 		usersStore,
 		dockerStore,
 		queueInspector,
+		settingsStore,
+		cfg,
 	)
 	hostGroupsHandler := handler.NewHostGroupsHandler(hostGroupsStore, hostsStore)
 	dashboardPrefsHandler := handler.NewDashboardPreferencesHandler(dashboardPrefsStore)
@@ -176,6 +192,7 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 	integrationsHandler := handler.NewIntegrationsHandler(hostsStore, store.NewDockerStore(dbProvider), integrationStatusStore, dbProvider, notifyEmit)
 	complianceStore := store.NewComplianceStore(dbProvider)
 	complianceHandler := handler.NewComplianceHandler(complianceStore, hostsStore, registry, queueClient, queueInspector, integrationStatusStore, cfg.SSGContentDir, notifyEmit)
+	complianceHandler.SetDB(dbProvider)
 	autoEnrollmentStore := store.NewAutoEnrollmentStore(dbProvider)
 	autoEnrollmentHandler := handler.NewAutoEnrollmentHandler(autoEnrollmentStore, hostGroupsStore, hostsStore, settingsStore, log, cfg)
 
@@ -184,7 +201,13 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 	if rdb != nil && enc != nil {
 		bootstrapStore = store.NewBootstrapStore(redisResolver, enc)
 	}
-	if rdb != nil {
+	// fork: PM_ENABLE_REMOTE_ACCESS. When off, nothing SSH/RDP related is
+	// constructed (no ticket stores, no terminal/RDP handlers, no guacd).
+	remoteAccess := cfg.EnableRemoteAccess // cfg is dereferenced above, never nil here
+	if !remoteAccess && log != nil {
+		log.Info("remote access (browser SSH terminal, RDP) is disabled; set PM_ENABLE_REMOTE_ACCESS=true to enable")
+	}
+	if remoteAccess && rdb != nil {
 		sshTicketStore = store.NewSshTicketStore(redisResolver)
 	}
 	reportStore := store.NewReportStore(dbProvider)
@@ -194,7 +217,7 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 	alertConfigStore := store.NewAlertConfigStore(dbProvider)
 	var sshTerminalWSHandler *handler.SshTerminalWSHandler
 	var rdpHandler *handler.RDPHandler
-	if rdb != nil && cfg.GuacdAddress != "" {
+	if remoteAccess && rdb != nil && cfg.GuacdAddress != "" {
 		rdpTicketStore := store.NewRDPTicketStore(redisResolver, enc)
 		rdpSessions := rdpproxy.NewSessions(log, registry)
 		rdpHandler = handler.NewRDPHandler(
@@ -206,6 +229,7 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 	agentOpts := []handler.AgentWSHandlerOption{
 		handler.WithOnAgentDisconnect(handler.NewAgentDisconnectHandler(dbProvider, notifyEmit, log)),
 		handler.WithOnAgentConnect(handler.NewAgentConnectHandler(dbProvider, queueClient, queueInspector, notifyEmit, log)),
+		handler.WithOnComplianceProgress(handler.NewComplianceProgressHandler(hostsStore, complianceStore, log)),
 	}
 	if rdpHandler != nil {
 		agentOpts = append(agentOpts, handler.WithOnRDPProxyMessage(rdpHandler.HandleRDPProxyMessage))
@@ -213,7 +237,7 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 	if sshTicketStore != nil {
 		sshTerminalWSHandler = handler.NewSshTerminalWSHandler(
 			sshTicketStore, hostsStore, usersStore, permissionsStore,
-			registry, sshProxySessions, log,
+			registry, sshProxySessions, log, dbProvider,
 		)
 		agentWsHandler = handler.NewAgentWSHandler(
 			hostsStore, registry, sshTerminalWSHandler.HandleAgentMessage,
@@ -233,7 +257,7 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 
 	// Alerts/reporting
 	alertsHandler := handler.NewAlertsHandler(alertsStore, alertConfigStore, dbProvider)
-	agentVersionHandler := handler.NewAgentVersionHandler(log)
+	agentVersionHandler := handler.NewAgentVersionHandler(log, cfg != nil && cfg.HideCommunityLinks)
 	alertConfigHandler := handler.NewAlertConfigHandler(alertConfigStore)
 	notificationsHandler := handler.NewNotificationsHandler(dbProvider, enc, notifyEmit, resolved, cfg, settingsStore, queueClient)
 	automationHandler := handler.NewAutomationHandler(queueInspector, queueClient, registry, settingsStore, alertConfigStore)
@@ -244,6 +268,7 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 	patchAssignmentsStore := store.NewPatchPolicyAssignmentsStore(dbProvider)
 	patchExclusionsStore := store.NewPatchPolicyExclusionsStore(dbProvider)
 	patchingHandler := handler.NewPatchingHandler(patchRunsStore, patchPoliciesStore, patchAssignmentsStore, patchExclusionsStore, hostsStore, settingsStore, cfg, queueClient, queueInspector, notifyEmit, log)
+	patchingHandler.SetDB(dbProvider)
 	// Wire up the live patch-run stream hub and the agent WebSocket registry
 	// for the stop-run endpoint. Kept as optional dependencies so unrelated
 	// call-sites don't need to thread them.
@@ -265,10 +290,12 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 	// When GUACD_ADDRESS points to a remote host (e.g. guacd:4822 in Docker), guacd runs as a sidecar.
 	var guacdProc *guacd.Process
 	rdpEnabled := rdpHandler != nil
-	if rdpEnabled && !guacd.IsRemoteAddress(cfg.GuacdAddress) {
-		guacdProc = guacd.Start(ctx, cfg.GuacdPath, cfg.GuacdAddress, log)
-	} else if rdpEnabled && guacd.IsRemoteAddress(cfg.GuacdAddress) && log != nil {
-		log.Info("RDP using remote guacd", "addr", cfg.GuacdAddress)
+	if remoteAccess {
+		if rdpEnabled && !guacd.IsRemoteAddress(cfg.GuacdAddress) {
+			guacdProc = guacd.Start(ctx, cfg.GuacdPath, cfg.GuacdAddress, log)
+		} else if rdpEnabled && guacd.IsRemoteAddress(cfg.GuacdAddress) && log != nil {
+			log.Info("RDP using remote guacd", "addr", cfg.GuacdAddress)
+		}
 	}
 
 	r.Route("/api/v1", func(r chi.Router) {
@@ -281,7 +308,7 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 		}
 		// Note: /api/v1/internal/migrate-tenant is intentionally registered
 		// at the router root (above) rather than inside this /api/v1 group,
-		// because the group's 30s chimw.Timeout would defeat the handler's
+		// because the group's 30s Timeout middleware would defeat the handler's
 		// 10-minute migration bound.
 		// OpenAPI spec (public, for Swagger UI and tooling)
 		r.Get("/openapi.json", swagger.ServeSpec)
@@ -316,11 +343,15 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 		// Gated by the ssh_terminal module (Max tier) for multi-context deployments.
 		if sshTerminalWSHandler != nil {
 			r.With(hostctx.RequireModule("ssh_terminal")).Get("/ssh-terminal/{hostId}", sshTerminalWSHandler.ServeWS)
+		} else {
+			r.Get("/ssh-terminal/{hostId}", handler.RemoteAccessDisabled())
 		}
 		// RDP WebSocket tunnel (ticket auth via query param).
 		// Gated by the rdp module (Max tier) for multi-context deployments.
 		if rdpEnabled {
 			r.With(hostctx.RequireModule("rdp")).Handle("/rdp/websocket-tunnel", rdpHandler.WebsocketTunnelHandler())
+		} else {
+			r.Handle("/rdp/websocket-tunnel", handler.RemoteAccessDisabled())
 		}
 
 		r.Get("/auth/signup-enabled", authHandler.SignupEnabled)
@@ -448,10 +479,14 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 			if sshTicketHandler != nil {
 				// Gated by ssh_terminal module (Max tier).
 				r.With(middleware.RequirePermission("can_use_remote_access", permissionsStore), hostctx.RequireModule("ssh_terminal")).Post("/auth/ssh-ticket", sshTicketHandler.ServeCreate)
+			} else {
+				r.Post("/auth/ssh-ticket", handler.RemoteAccessDisabled())
 			}
 			if rdpEnabled {
 				// Gated by rdp module (Max tier).
 				r.With(middleware.RequirePermission("can_use_remote_access", permissionsStore), hostctx.RequireModule("rdp")).Post("/auth/rdp-ticket", rdpHandler.ServeCreateTicket)
+			} else {
+				r.Post("/auth/rdp-ticket", handler.RemoteAccessDisabled())
 			}
 			r.Get("/user/preferences", userPrefsHandler.Get)
 			r.Patch("/user/preferences", userPrefsHandler.Update)
@@ -473,6 +508,12 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 			r.With(middleware.RequirePermission("can_manage_settings", permissionsStore)).Put("/metrics", metricsHandler.Update)
 			r.With(middleware.RequirePermission("can_manage_settings", permissionsStore)).Post("/metrics/regenerate-id", metricsHandler.RegenerateID)
 			r.With(middleware.RequirePermission("can_manage_settings", permissionsStore)).Post("/metrics/send-now", metricsHandler.SendNow)
+			// Licence (fork feature): every signed-in user may read the usage (host
+			// counts and the licensed number, nothing secret; the dashboard stats
+			// expose the same figures). Write stays superadmin-only: permission gate
+			// here plus the role check in the handler.
+			r.Get("/license", licenseHandler.Get)
+			r.With(middleware.RequirePermission("can_manage_settings", permissionsStore)).Put("/license", licenseHandler.Update)
 			r.Get("/version/current", settingsHandler.VersionCurrent(cfg.Version))
 			r.With(middleware.RequirePermission("can_manage_settings", permissionsStore)).Get("/version/check-updates", settingsHandler.VersionCheckUpdates(cfg.Version))
 			// AI routes gated by the ai module (Max tier).
@@ -513,6 +554,7 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 			r.With(middleware.RequirePermission("can_manage_hosts", permissionsStore), hostctx.RequireModule("compliance")).Post("/hosts/{hostId}/integrations/compliance/scanners", hostsHandler.SetComplianceScanners)
 			r.With(middleware.RequirePermission("can_manage_hosts", permissionsStore), hostctx.RequireModule("compliance")).Post("/hosts/{hostId}/integrations/compliance/default-profile", hostsHandler.SetComplianceDefaultProfile)
 			r.With(middleware.RequirePermission("can_manage_hosts", permissionsStore)).Post("/hosts/{hostId}/integrations/apply-pending-config", hostsHandler.ApplyPendingConfig)
+			r.With(middleware.RequirePermission("can_manage_hosts", permissionsStore)).Delete("/hosts/{hostId}/integrations/pending-config", hostsHandler.DiscardPendingConfig)
 			r.With(middleware.RequirePermission("can_manage_hosts", permissionsStore)).Post("/hosts/{hostId}/integrations/{integrationName}/toggle", hostsHandler.ToggleIntegration)
 			r.With(middleware.RequirePermission("can_view_hosts", permissionsStore)).Get("/hosts/{hostId}", hostsHandler.GetByID)
 			r.With(middleware.RequirePermission("can_manage_hosts", permissionsStore)).Post("/hosts/create", hostsHandler.Create)
@@ -526,6 +568,12 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 			r.With(middleware.RequirePermission("can_manage_hosts", permissionsStore)).Patch("/hosts/{hostId}/host-down-alerts", hostsHandler.UpdateHostDownAlerts)
 			r.With(middleware.RequirePermission("can_manage_hosts", permissionsStore)).Post("/hosts/{hostId}/regenerate-credentials", hostsHandler.RegenerateCredentials)
 			r.With(middleware.RequirePermission("can_manage_hosts", permissionsStore)).Post("/hosts/bulk/fetch-report", hostsHandler.FetchReportBulk)
+			r.With(middleware.RequirePermission("can_reboot_hosts", permissionsStore)).Post("/hosts/bulk/reboot", hostsHandler.RebootBulk)
+			r.With(middleware.RequirePermission("can_reboot_hosts", permissionsStore)).Put("/hosts/bulk/allow-reboot", hostsHandler.AllowRebootBulk)
+			r.With(middleware.RequirePermission("can_reboot_hosts", permissionsStore)).Get("/reboot-schedules", rebootSchedulesHandler.List)
+			r.With(middleware.RequirePermission("can_reboot_hosts", permissionsStore)).Post("/reboot-schedules", rebootSchedulesHandler.Create)
+			r.With(middleware.RequirePermission("can_reboot_hosts", permissionsStore)).Put("/reboot-schedules/{id}", rebootSchedulesHandler.Update)
+			r.With(middleware.RequirePermission("can_reboot_hosts", permissionsStore)).Delete("/reboot-schedules/{id}", rebootSchedulesHandler.Delete)
 			r.With(middleware.RequirePermission("can_manage_hosts", permissionsStore)).Post("/hosts/{hostId}/fetch-report", hostsHandler.FetchReport)
 			r.With(middleware.RequirePermission("can_manage_hosts", permissionsStore)).Post("/hosts/{hostId}/refresh-integration-status", hostsHandler.RefreshIntegrationStatus)
 			r.With(middleware.RequirePermission("can_manage_hosts", permissionsStore)).Post("/hosts/{hostId}/refresh-docker", hostsHandler.RefreshDocker)
@@ -598,6 +646,11 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 			r.With(middleware.RequirePermission("can_manage_patching", permissionsStore), hostctx.RequireModule("patching")).Post("/patching/runs/{id}/retry-validation", patchingHandler.RetryValidation)
 			r.With(middleware.RequirePermission("can_manage_patching", permissionsStore), hostctx.RequireModule("patching")).Post("/patching/runs/{id}/stop", patchingHandler.StopRun)
 			r.With(middleware.RequirePermission("can_manage_patching", permissionsStore), hostctx.RequireModule("patching")).Delete("/patching/runs/{id}", patchingHandler.DeleteRun)
+			// Fork: failed runs can be marked as solved (and reopened); bulk before {id} so chi does not treat "bulk-solve" as an id.
+			r.With(middleware.RequirePermission("can_manage_patching", permissionsStore), hostctx.RequireModule("patching")).Post("/patching/runs/bulk-solve", patchingHandler.BulkSolveRuns)
+			r.With(middleware.RequirePermission("can_manage_patching", permissionsStore), hostctx.RequireModule("patching")).Post("/patching/runs/{id}/solve", patchingHandler.SolveRun)
+			r.With(middleware.RequirePermission("can_manage_patching", permissionsStore), hostctx.RequireModule("patching")).Post("/patching/runs/{id}/reopen", patchingHandler.ReopenRun)
+			r.With(middleware.RequirePermission("can_manage_patching", permissionsStore), hostctx.RequireModule("patching")).Patch("/patching/runs/{id}/solved-note", patchingHandler.UpdateSolvedNote)
 			r.With(middleware.RequirePermission("can_manage_patching", permissionsStore), hostctx.RequireModule("patching")).Post("/patching/trigger", patchingHandler.Trigger)
 			// Policies + approval workflow: patching_policies module.
 			r.With(middleware.RequirePermission("can_view_hosts", permissionsStore), hostctx.RequireModule("patching_policies")).Get("/patching/policies", patchingHandler.ListPolicies)
@@ -610,6 +663,11 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 			r.With(middleware.RequirePermission("can_manage_patching", permissionsStore), hostctx.RequireModule("patching_policies")).Delete("/patching/policies/{id}/assignments/{assignmentId}", patchingHandler.RemovePolicyAssignment)
 			r.With(middleware.RequirePermission("can_manage_patching", permissionsStore), hostctx.RequireModule("patching_policies")).Post("/patching/policies/{id}/exclusions", patchingHandler.AddPolicyExclusion)
 			r.With(middleware.RequirePermission("can_manage_patching", permissionsStore), hostctx.RequireModule("patching_policies")).Delete("/patching/policies/{id}/exclusions/{hostId}", patchingHandler.RemovePolicyExclusion)
+			// Patch schedules: recurring/one-shot scheduled patch runs for a host group.
+			r.With(middleware.RequirePermission("can_view_hosts", permissionsStore), hostctx.RequireModule("patching")).Get("/patch-schedules", patchSchedulesHandler.List)
+			r.With(middleware.RequirePermission("can_manage_patching", permissionsStore), hostctx.RequireModule("patching")).Post("/patch-schedules", patchSchedulesHandler.Create)
+			r.With(middleware.RequirePermission("can_manage_patching", permissionsStore), hostctx.RequireModule("patching")).Put("/patch-schedules/{id}", patchSchedulesHandler.Update)
+			r.With(middleware.RequirePermission("can_manage_patching", permissionsStore), hostctx.RequireModule("patching")).Delete("/patch-schedules/{id}", patchSchedulesHandler.Delete)
 			// Windows Update metadata for a host (UI-facing). Part of the patching feature set.
 			r.With(middleware.RequirePermission("can_view_hosts", permissionsStore), hostctx.RequireModule("patching")).Get("/patching/windows-updates/{hostId}", windowsUpdatesHandler.ListForHost)
 
@@ -656,6 +714,9 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 			r.With(middleware.RequirePermission("can_manage_notifications", permissionsStore)).Get("/notifications/scheduled-reports", notificationsHandler.ListScheduledReports)
 			r.With(middleware.RequirePermission("can_manage_notifications", permissionsStore)).Post("/notifications/scheduled-reports", notificationsHandler.CreateScheduledReport)
 			r.With(middleware.RequirePermission("can_manage_notifications", permissionsStore)).Post("/notifications/scheduled-reports/{id}/run-now", notificationsHandler.RunScheduledReportNow)
+			r.With(middleware.RequirePermission("can_manage_notifications", permissionsStore)).Post("/notifications/scheduled-reports/{id}/preview", notificationsHandler.PreviewScheduledReport)
+			r.With(middleware.RequirePermission("can_manage_notifications", permissionsStore)).Get("/notifications/scheduled-reports/{id}/archive", notificationsHandler.ListReportArchive)
+			r.With(middleware.RequirePermission("can_manage_notifications", permissionsStore)).Get("/notifications/scheduled-reports/archive/{archiveId}/pdf", notificationsHandler.DownloadReportArchivePDF)
 			r.With(middleware.RequirePermission("can_manage_notifications", permissionsStore)).Put("/notifications/scheduled-reports/{id}", notificationsHandler.UpdateScheduledReport)
 			r.With(middleware.RequirePermission("can_manage_notifications", permissionsStore)).Delete("/notifications/scheduled-reports/{id}", notificationsHandler.DeleteScheduledReport)
 

@@ -14,6 +14,7 @@ import (
 	"github.com/PatchMon/PatchMon/server-source-code/internal/alerts"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/config"
 	hostctx "github.com/PatchMon/PatchMon/server-source-code/internal/context"
+	"github.com/PatchMon/PatchMon/server-source-code/internal/database"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/db"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/middleware"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/notifications"
@@ -54,6 +55,8 @@ type PatchingHandler struct {
 	queueInspector *asynq.Inspector
 	notify         *notifications.Emitter
 	log            *slog.Logger
+	// db is used for audit entries of fork actions (solve/reopen); see SetDB.
+	db database.DBProvider
 
 	// Optional collaborators for live patch-run streaming.
 	// Populated via SetStreamDependencies after construction so existing
@@ -372,7 +375,7 @@ func (h *PatchingHandler) Dashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	statusCounts := map[string]int{
-		"queued": 0, "running": 0, "completed": 0, "failed": 0, "cancelled": 0,
+		"queued": 0, "running": 0, "completed": 0, "failed": 0, "cancelled": 0, "solved": 0,
 		"pending_validation": 0, "pending_approval": 0, "validated": 0,
 	}
 	for k, v := range byStatus {
@@ -384,6 +387,7 @@ func (h *PatchingHandler) Dashboard(w http.ResponseWriter, r *http.Request) {
 		"running":            statusCounts["running"],
 		"completed":          statusCounts["completed"],
 		"failed":             statusCounts["failed"],
+		"solved":             statusCounts["solved"],
 		"cancelled":          statusCounts["cancelled"],
 		"pending_validation": statusCounts["pending_validation"],
 		"pending_approval":   statusCounts["pending_approval"],
@@ -522,6 +526,11 @@ func (h *PatchingHandler) GetRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := patchRunToResponse(run)
+	if run.Status == "solved" {
+		if name, err := h.patchRuns.SolvedByUsername(r.Context(), id); err == nil {
+			resp["fork_solved_by_username"] = name
+		}
+	}
 	if host, err := h.hosts.GetByID(r.Context(), run.HostID); err == nil && host != nil {
 		if hosts, ok := resp["hosts"].(map[string]interface{}); ok {
 			hosts["awaiting_post_patch_report_run_id"] = host.AwaitingPostPatchReportRunID
@@ -655,6 +664,18 @@ func (h *PatchingHandler) ApproveRun(w http.ResponseWriter, r *http.Request) {
 		approvedBy = &userID
 	}
 
+	// Audit before any mutation: no approval without an audit trail.
+	if err := h.auditRunErr(r, "patch_run_approved", map[string]interface{}{
+		"validation_run_id": valRun.ID,
+		"patch_run_id":      newRunID,
+		"host_id":           valRun.HostID,
+		"triggered_by":      valRun.TriggeredByUserID,
+	}); err != nil {
+		h.log.Error("refusing approval: audit log write failed", "error", err)
+		Error(w, http.StatusInternalServerError, "Failed to write audit log")
+		return
+	}
+
 	// 1. Mark the validation run as "approved" (terminal - preserved with its output).
 	if err := h.patchRuns.MarkValidationApproved(r.Context(), validationID, approvedBy); err != nil {
 		h.log.Error("patching: mark validation approved error", "error", err)
@@ -784,6 +805,17 @@ func (h *PatchingHandler) RetryValidation(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Best effort: the retry is a dry run and changes nothing on the host.
+	h.auditRun(r, "patch_run_validation_retried", map[string]interface{}{"patch_run_id": id, "host_id": run.HostID})
+
+	// A pending offline-retry task for this run would dispatch the same dry
+	// run a second time once the host is back; this task replaces it.
+	if h.queueInspector != nil {
+		for _, retryID := range queue.OfflineRetryTaskIDs(id) {
+			_ = h.queueInspector.DeleteTask(queue.QueuePatching, retryID)
+		}
+	}
+
 	if _, err := h.queueClient.Enqueue(task); err != nil {
 		h.log.Error("patching: enqueue retry-validation error", "error", err)
 		JSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to queue validation retry"})
@@ -817,11 +849,13 @@ func (h *PatchingHandler) DeleteRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Remove run_patch task(s) from queue if present.
-	// Original task: patch-run-{id}, retry task: patch-run-{id}-retry
+	// Original task: patch-run-{id}, plus the offline-retry task(s).
 	if h.queueInspector != nil {
 		taskID := patchRunJobIDPrefix + id
 		_ = h.queueInspector.DeleteTask(queue.QueuePatching, taskID)
-		_ = h.queueInspector.DeleteTask(queue.QueuePatching, taskID+"-retry")
+		for _, retryID := range queue.OfflineRetryTaskIDs(id) {
+			_ = h.queueInspector.DeleteTask(queue.QueuePatching, retryID)
+		}
 	}
 	if err := h.patchRuns.Delete(r.Context(), id); err != nil {
 		h.log.Error("patching: delete run error", "patch_run_id", id, "error", err)
@@ -897,15 +931,31 @@ func (h *PatchingHandler) Trigger(w http.ResponseWriter, r *http.Request) {
 	var pkgNames []string
 	if body.PatchType == "patch_package" {
 		if len(body.PackageNames) > 0 {
-			for _, n := range body.PackageNames {
-				if !isValidPackageName(n) {
-					JSON(w, http.StatusBadRequest, map[string]string{"error": "Every package_names entry must be a valid package name"})
-					return
-				}
-			}
 			if len(body.PackageNames) > 100 {
 				JSON(w, http.StatusBadRequest, map[string]string{"error": "package_names limited to 100 packages per run"})
 				return
+			}
+			// Windows update titles ("2026-05 ... Update (KB...)") contain
+			// spaces and parentheses and fail the generic package-name pattern.
+			// Accept a name that resolves to a WUA GUID on this host instead -
+			// the actual name->GUID substitution happens at dispatch time
+			// (queue/jobs.go), so the run keeps the human-readable titles.
+			var resolved []string
+			for i, n := range body.PackageNames {
+				if isValidPackageName(n) {
+					continue
+				}
+				if resolved == nil {
+					var rerr error
+					resolved, rerr = h.patchRuns.ResolveWindowsUpdateNames(r.Context(), body.HostID, body.PackageNames)
+					if rerr != nil || len(resolved) != len(body.PackageNames) {
+						resolved = body.PackageNames // resolution unavailable -> reject below
+					}
+				}
+				if resolved[i] == n || !isValidPatchUUID(resolved[i]) {
+					JSON(w, http.StatusBadRequest, map[string]string{"error": "Every package_names entry must be a valid package name"})
+					return
+				}
 			}
 			pkgNames = body.PackageNames
 		} else if body.PackageName != "" && isValidPackageName(body.PackageName) {
@@ -992,6 +1042,31 @@ func (h *PatchingHandler) Trigger(w http.ResponseWriter, r *http.Request) {
 	var createOpts *store.CreateRunOpts
 	if body.PendingApproval {
 		createOpts = &store.CreateRunOpts{InitialStatus: "pending_approval"}
+	}
+	packageCount := len(pkgNames)
+	if pkgName != nil {
+		packageCount = 1
+	}
+	triggerDetail := map[string]interface{}{
+		"patch_run_id":     patchRunID,
+		"host_id":          host.ID,
+		"host_name":        host.FriendlyName,
+		"patch_type":       body.PatchType,
+		"package_count":    packageCount,
+		"dry_run":          body.DryRun,
+		"pending_approval": body.PendingApproval,
+		"policy":           policyNamePtr,
+		"scheduled_at":     scheduledAt,
+	}
+	if pkgName != nil {
+		triggerDetail["package_names"] = []string{*pkgName}
+	} else if len(pkgNames) > 0 {
+		triggerDetail["package_names"] = pkgNames // capped at 100 above
+	}
+	if err := h.auditRunErr(r, "patch_run_triggered", triggerDetail); err != nil {
+		h.log.Error("refusing patch trigger: audit log write failed", "error", err)
+		Error(w, http.StatusInternalServerError, "Failed to write audit log")
+		return
 	}
 	_, err = h.patchRuns.CreateRun(r.Context(), patchRunID, body.HostID, jobID, body.PatchType, pkgName, pkgNames, triggeredBy, body.DryRun, scheduledAt, policyID, policyNamePtr, policySnapshot, createOpts)
 	if err != nil {
@@ -1449,6 +1524,14 @@ func patchRunToResponse(r *db.GetPatchRunByIDRow) map[string]interface{} {
 		"validation_run_id":     r.ValidationRunID,
 		"policy_id":             r.PolicyID,
 		"policy_name":           r.PolicyName,
+		"fork_solved_by":        r.ForkSolvedBy,
+		"fork_solved_note":      r.ForkSolvedNote,
+		"fork_solved_by_run_id": r.ForkSolvedByRunID,
+	}
+	if r.ForkSolvedAt != nil {
+		m["fork_solved_at"] = r.ForkSolvedAt.UTC().Format(time.RFC3339)
+	} else {
+		m["fork_solved_at"] = nil
 	}
 	if len(r.PolicySnapshot) > 0 {
 		var snap map[string]interface{}

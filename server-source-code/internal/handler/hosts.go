@@ -1,19 +1,26 @@
 package handler
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/PatchMon/PatchMon/server-source-code/internal/agentregistry"
+	"github.com/PatchMon/PatchMon/server-source-code/internal/config"
 	hostctx "github.com/PatchMon/PatchMon/server-source-code/internal/context"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/database"
+	"github.com/PatchMon/PatchMon/server-source-code/internal/db"
+	"github.com/PatchMon/PatchMon/server-source-code/internal/middleware"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/models"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/notifications"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/queue"
+	"github.com/PatchMon/PatchMon/server-source-code/internal/serverident"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/store"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -32,10 +39,11 @@ type HostsHandler struct {
 	pendingConfig     *store.PendingConfigStore
 	db                database.DBProvider
 	notify            *notifications.Emitter
+	cfg               *config.Config
 }
 
 // NewHostsHandler creates a new hosts handler.
-func NewHostsHandler(hosts *store.HostsStore, hostGroups *store.HostGroupsStore, settings *store.SettingsStore, queueClient *asynq.Client, registry *agentregistry.Registry, integrationStatus *store.IntegrationStatusStore, pendingConfig *store.PendingConfigStore, db database.DBProvider, notify *notifications.Emitter) *HostsHandler {
+func NewHostsHandler(hosts *store.HostsStore, hostGroups *store.HostGroupsStore, settings *store.SettingsStore, queueClient *asynq.Client, registry *agentregistry.Registry, integrationStatus *store.IntegrationStatusStore, pendingConfig *store.PendingConfigStore, db database.DBProvider, notify *notifications.Emitter, cfg *config.Config) *HostsHandler {
 	return &HostsHandler{
 		hosts:             hosts,
 		hostGroups:        hostGroups,
@@ -46,6 +54,7 @@ func NewHostsHandler(hosts *store.HostsStore, hostGroups *store.HostGroupsStore,
 		pendingConfig:     pendingConfig,
 		db:                db,
 		notify:            notify,
+		cfg:               cfg,
 	}
 }
 
@@ -171,6 +180,12 @@ func (h *HostsHandler) Create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Fork licence gate: active+pending slots against max + tolerance.
+	if licenseBlocksHostCreate(r.Context(), h.cfg, h.settings, h.hosts) {
+		Error(w, http.StatusForbidden, licenseLimitMessage)
+		return
+	}
+
 	machineID := "pending-" + uuid.New().String()
 	host := &models.Host{
 		MachineID:              &machineID,
@@ -272,6 +287,34 @@ func (h *HostsHandler) UpdateGroups(w http.ResponseWriter, r *http.Request) {
 }
 
 // UpdateFriendlyName handles PATCH /hosts/:hostId/friendly-name.
+// requireHost loads the host and writes a 404 when it does not exist,
+// reporting whether the caller may continue.
+//
+// HostsStore.GetByID returns (nil, nil) for "no such row", so a caller that
+// only tests err goes on to dereference a nil host. The underlying update
+// statements are sqlc :exec and report no error for zero rows affected, so
+// without this check an unknown id produced a no-op write followed by a nil
+// dereference (converted to a 500 by the Recovery middleware) rather than the
+// 404 it should be.
+func (h *HostsHandler) requireHost(w http.ResponseWriter, r *http.Request, hostID string) (*models.Host, bool) {
+	host, err := h.hosts.GetByID(r.Context(), hostID)
+	if err != nil || host == nil {
+		Error(w, http.StatusNotFound, "Host not found")
+		return nil, false
+	}
+	return host, true
+}
+
+// reloadHost re-reads the host after a write so the response reflects it,
+// falling back to the pre-write row if the host was deleted concurrently.
+// The returned value is never nil.
+func (h *HostsHandler) reloadHost(r *http.Request, hostID string, fallback *models.Host) *models.Host {
+	if updated, err := h.hosts.GetByID(r.Context(), hostID); err == nil && updated != nil {
+		return updated
+	}
+	return fallback
+}
+
 func (h *HostsHandler) UpdateFriendlyName(w http.ResponseWriter, r *http.Request) {
 	hostID := chi.URLParam(r, "hostId")
 	var req struct {
@@ -286,11 +329,16 @@ func (h *HostsHandler) UpdateFriendlyName(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	existing, ok := h.requireHost(w, r, hostID)
+	if !ok {
+		return
+	}
+
 	if err := h.hosts.UpdateFriendlyName(r.Context(), hostID, req.FriendlyName); err != nil {
 		Error(w, http.StatusInternalServerError, "Failed to update friendly name")
 		return
 	}
-	host, _ := h.hosts.GetByID(r.Context(), hostID)
+	host := h.reloadHost(r, hostID, existing)
 	groups, _ := h.hosts.GetHostGroups(r.Context(), hostID)
 	JSON(w, http.StatusOK, map[string]interface{}{
 		"message": "Friendly name updated successfully",
@@ -309,11 +357,16 @@ func (h *HostsHandler) UpdateNotes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	existing, ok := h.requireHost(w, r, hostID)
+	if !ok {
+		return
+	}
+
 	if err := h.hosts.UpdateNotes(r.Context(), hostID, req.Notes); err != nil {
 		Error(w, http.StatusInternalServerError, "Failed to update notes")
 		return
 	}
-	host, _ := h.hosts.GetByID(r.Context(), hostID)
+	host := h.reloadHost(r, hostID, existing)
 	groups, _ := h.hosts.GetHostGroups(r.Context(), hostID)
 	JSON(w, http.StatusOK, map[string]interface{}{
 		"message": "Notes updated successfully",
@@ -333,11 +386,16 @@ func (h *HostsHandler) UpdateConnection(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	existing, ok := h.requireHost(w, r, hostID)
+	if !ok {
+		return
+	}
+
 	if err := h.hosts.UpdateConnection(r.Context(), hostID, req.IP, req.Hostname); err != nil {
 		Error(w, http.StatusInternalServerError, "Failed to update connection")
 		return
 	}
-	host, _ := h.hosts.GetByID(r.Context(), hostID)
+	host := h.reloadHost(r, hostID, existing)
 	groups, _ := h.hosts.GetHostGroups(r.Context(), hostID)
 	JSON(w, http.StatusOK, map[string]interface{}{
 		"message": "Host connection information updated successfully",
@@ -428,11 +486,16 @@ func (h *HostsHandler) UpdateAutoUpdate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	existing, ok := h.requireHost(w, r, hostID)
+	if !ok {
+		return
+	}
+
 	if err := h.hosts.UpdateAutoUpdate(r.Context(), hostID, req.AutoUpdate); err != nil {
 		Error(w, http.StatusInternalServerError, "Failed to update auto-update")
 		return
 	}
-	host, _ := h.hosts.GetByID(r.Context(), hostID)
+	host := h.reloadHost(r, hostID, existing)
 	JSON(w, http.StatusOK, map[string]interface{}{
 		"message": "Agent auto-update " + map[bool]string{true: "enabled", false: "disabled"}[req.AutoUpdate] + " successfully",
 		"host":    map[string]interface{}{"id": host.ID, "friendlyName": host.FriendlyName, "autoUpdate": req.AutoUpdate},
@@ -538,6 +601,286 @@ func (h *HostsHandler) FetchReportBulk(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// isSelfHost reports whether the given host is the machine the PatchMon server
+// itself runs on. The actual matching lives in the serverident package so the
+// scheduled-reboot queue worker applies the identical exclusion logic.
+func isSelfHost(host *models.Host) bool {
+	return serverident.IsSelf(host.MachineID)
+}
+
+// AllowRebootBulk handles PUT /hosts/bulk/allow-reboot. Sets the allow_reboot
+// allowlist flag on the given hosts. The change is audited before it is
+// applied (fail closed): the flag gates a destructive action, so an
+// unauditable change must not happen. The PatchMon server's own host is
+// refused here as well, mirroring the reboot self-exclusion.
+func (h *HostsHandler) AllowRebootBulk(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		HostIDs     []string `json:"hostIds"`
+		AllowReboot bool     `json:"allowReboot"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		Error(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if len(req.HostIDs) == 0 {
+		Error(w, http.StatusBadRequest, "hostIds required")
+		return
+	}
+
+	seen := make(map[string]struct{}, len(req.HostIDs))
+	hostIDs := make([]string, 0, len(req.HostIDs))
+	for _, id := range req.HostIDs {
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		hostIDs = append(hostIDs, id)
+	}
+
+	hosts, err := h.hosts.GetByIDs(r.Context(), hostIDs)
+	if err != nil {
+		Error(w, http.StatusInternalServerError, "Failed to resolve hosts")
+		return
+	}
+	found := make(map[string]*models.Host, len(hosts))
+	for i := range hosts {
+		found[hosts[i].ID] = &hosts[i]
+	}
+
+	updateIDs := []string{}
+	updated := []map[string]string{}
+	skipped := []map[string]string{}
+	for _, hostID := range hostIDs {
+		host, ok := found[hostID]
+		if !ok {
+			skipped = append(skipped, map[string]string{"hostId": hostID, "reason": "Host not found"})
+			continue
+		}
+		hostname := host.FriendlyName
+		if host.Hostname != nil && *host.Hostname != "" {
+			hostname = *host.Hostname
+		}
+		if req.AllowReboot && isSelfHost(host) {
+			skipped = append(skipped, map[string]string{"hostId": hostID, "hostname": hostname, "reason": "the server's own host cannot be made rebootable"})
+			continue
+		}
+		updateIDs = append(updateIDs, hostID)
+		updated = append(updated, map[string]string{"hostId": hostID, "hostname": hostname})
+	}
+
+	if len(updateIDs) > 0 {
+		if err := h.writeAuditLog(r, "host_allow_reboot_updated", true, map[string]interface{}{
+			"allow_reboot": req.AllowReboot,
+			"hosts":        updated,
+			"skipped":      skipped,
+		}); err != nil {
+			slog.Error("refusing allow_reboot change: audit log write failed", "error", err)
+			Error(w, http.StatusInternalServerError, "Failed to write audit log")
+			return
+		}
+		if err := h.hosts.UpdateAllowReboot(r.Context(), updateIDs, req.AllowReboot); err != nil {
+			// The intent entry above is already written; log the divergence.
+			slog.Error("allow_reboot update failed after audit write", "error", err)
+			Error(w, http.StatusInternalServerError, "Failed to update hosts")
+			return
+		}
+	}
+
+	JSON(w, http.StatusOK, map[string]interface{}{
+		"message": "Reboot permission " + map[bool]string{true: "granted", false: "revoked"}[req.AllowReboot],
+		"success": true,
+		"updated": len(updateIDs),
+		"skipped": skipped,
+	})
+}
+
+// RebootBulk handles POST /hosts/bulk/reboot. The host running the PatchMon
+// server itself is excluded and reported back in the skipped list.
+func (h *HostsHandler) RebootBulk(w http.ResponseWriter, r *http.Request) {
+	if h.queueClient == nil {
+		Error(w, http.StatusServiceUnavailable, "Queue service unavailable")
+		return
+	}
+	var req struct {
+		HostIDs        []string `json:"hostIds"`
+		OnlyIfRequired bool     `json:"onlyIfRequired"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		Error(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if len(req.HostIDs) == 0 {
+		Error(w, http.StatusBadRequest, "hostIds required")
+		return
+	}
+
+	// Fail closed: without a known server machine identity the self-exclusion
+	// check cannot work, so no reboot is allowed at all.
+	if len(serverident.MachineIDs()) == 0 {
+		slog.Error("refusing reboot request: self-exclusion not configured (no DMI product UUID, no /run/host-machine-id mount, no PM_SERVER_MACHINE_ID)")
+		Error(w, http.StatusServiceUnavailable, "Reboot refused: self-exclusion is not configured. Mount the host's /etc/machine-id to /run/host-machine-id or set PM_SERVER_MACHINE_ID.")
+		return
+	}
+
+	// Deduplicate before the batch-size check so repeated IDs neither inflate
+	// the count nor produce duplicate audit entries / misleading skip reasons.
+	seen := make(map[string]struct{}, len(req.HostIDs))
+	hostIDs := make([]string, 0, len(req.HostIDs))
+	for _, id := range req.HostIDs {
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		hostIDs = append(hostIDs, id)
+	}
+	if len(hostIDs) > queue.MaxRebootBatchSize {
+		Error(w, http.StatusBadRequest, fmt.Sprintf("Too many hosts: maximum %d per reboot request", queue.MaxRebootBatchSize))
+		return
+	}
+
+	// Phase 1: resolve hosts, apply the allow_reboot allowlist and the
+	// self-exclusion check. allow_reboot is fail-closed by design: hosts an
+	// operator never opted in are not rebootable.
+	type rebootTarget struct {
+		host     *models.Host
+		hostID   string
+		hostname string
+	}
+	targets := []rebootTarget{}
+	requested := []map[string]string{}
+	skipped := []map[string]string{}
+	for _, hostID := range hostIDs {
+		host, err := h.hosts.GetByID(r.Context(), hostID)
+		if err != nil || host == nil {
+			skipped = append(skipped, map[string]string{"hostId": hostID, "reason": "Host not found"})
+			continue
+		}
+		hostname := host.FriendlyName
+		if host.Hostname != nil && *host.Hostname != "" {
+			hostname = *host.Hostname
+		}
+		if isSelfHost(host) {
+			skipped = append(skipped, map[string]string{"hostId": hostID, "hostname": hostname, "reason": "the server's own host cannot be rebooted"})
+			continue
+		}
+		if !host.AllowReboot {
+			skipped = append(skipped, map[string]string{"hostId": hostID, "hostname": hostname, "reason": "Reboot not allowed for this host (allow_reboot is not set)"})
+			continue
+		}
+		targets = append(targets, rebootTarget{host: host, hostID: hostID, hostname: hostname})
+		requested = append(requested, map[string]string{"hostId": hostID, "hostname": hostname})
+	}
+
+	// Phase 2: write the audit intent BEFORE enqueueing. Fail closed: a reboot
+	// that cannot be audited must not happen.
+	if err := h.auditRebootRequest(r, req.OnlyIfRequired, requested, skipped); err != nil {
+		slog.Error("refusing reboot request: audit log write failed", "error", err)
+		Error(w, http.StatusInternalServerError, "Failed to write audit log")
+		return
+	}
+
+	// Phase 3: enqueue. Per-host delivery status is tracked in job_history.
+	enqueued := 0
+	failed := []map[string]string{}
+	for _, t := range targets {
+		task, err := queue.NewRebootTask(queue.RebootPayload{
+			ApiID:          t.host.ApiID,
+			Host:           hostFromRequest(r),
+			OnlyIfRequired: req.OnlyIfRequired,
+		})
+		if err != nil {
+			failed = append(failed, map[string]string{"hostId": t.hostID, "hostname": t.hostname, "reason": "Failed to create reboot task"})
+			continue
+		}
+		if _, err := h.queueClient.Enqueue(task); err != nil {
+			reason := "Failed to enqueue reboot task"
+			if errors.Is(err, asynq.ErrTaskIDConflict) {
+				reason = "Reboot already pending for this host (cooldown)"
+			}
+			failed = append(failed, map[string]string{"hostId": t.hostID, "hostname": t.hostname, "reason": reason})
+			continue
+		}
+		enqueued++
+	}
+	skipped = append(skipped, failed...)
+
+	// Phase 4: record the effective outcome. The intent entry above can claim
+	// success while every enqueue fails; this follow-up entry closes that gap.
+	// Best effort: the action already happened, so a write failure is logged
+	// rather than turned into a client error.
+	if err := h.auditRebootResult(r, enqueued, failed); err != nil {
+		slog.Error("failed to write reboot result audit log", "error", err)
+	}
+
+	JSON(w, http.StatusOK, map[string]interface{}{
+		"message":  "Reboot requested",
+		"success":  true,
+		"enqueued": enqueued,
+		"skipped":  skipped,
+	})
+}
+
+// auditRebootRequest writes an audit_logs entry attributing the reboot request
+// to the acting user, before any task is enqueued. job_history covers the
+// per-host command lifecycle but has no user attribution, so this destructive
+// action is additionally audited here.
+func (h *HostsHandler) auditRebootRequest(r *http.Request, onlyIfRequired bool, requested, skipped []map[string]string) error {
+	return h.writeAuditLog(r, "host_reboot_requested", len(requested) > 0, map[string]interface{}{
+		"only_if_required": onlyIfRequired,
+		"requested":        requested,
+		"skipped":          skipped,
+	})
+}
+
+// auditRebootResult records the effective enqueue outcome, complementing the
+// intent entry written by auditRebootRequest.
+func (h *HostsHandler) auditRebootResult(r *http.Request, enqueued int, failed []map[string]string) error {
+	return h.writeAuditLog(r, "host_reboot_enqueued", enqueued > 0, map[string]interface{}{
+		"enqueued": enqueued,
+		"failed":   failed,
+	})
+}
+
+// writeAuditLog inserts an audit_logs entry attributed to the acting user.
+func (h *HostsHandler) writeAuditLog(r *http.Request, event string, success bool, detail map[string]interface{}) error {
+	if h.db == nil {
+		return fmt.Errorf("no database available for audit log")
+	}
+	ctx := r.Context()
+	d := h.db.DB(ctx)
+	if d == nil {
+		return fmt.Errorf("no database available for audit log")
+	}
+
+	var userID *string
+	if uid, _ := ctx.Value(middleware.UserIDKey).(string); uid != "" {
+		userID = &uid
+	}
+	var requestID *string
+	if rid, _ := ctx.Value(middleware.RequestIDKey).(string); rid != "" {
+		requestID = &rid
+	}
+	ip := clientIPFromRequest(r)
+	ua := r.UserAgent()
+
+	var details *string
+	if b, err := json.Marshal(detail); err == nil {
+		s := string(b)
+		details = &s
+	}
+
+	return d.Queries.InsertAuditLog(ctx, db.InsertAuditLogParams{
+		ID:        uuid.New().String(),
+		Event:     event,
+		UserID:    userID,
+		IpAddress: &ip,
+		UserAgent: &ua,
+		RequestID: requestID,
+		Details:   details,
+		Success:   success,
+	})
+}
+
 // RefreshIntegrationStatus handles POST /hosts/:hostId/refresh-integration-status.
 func (h *HostsHandler) RefreshIntegrationStatus(w http.ResponseWriter, r *http.Request) {
 	if h.queueClient == nil {
@@ -625,6 +968,13 @@ func (h *HostsHandler) ForceAgentUpdate(w http.ResponseWriter, r *http.Request) 
 		Error(w, http.StatusNotFound, "Host not found")
 		return
 	}
+	if err := h.writeAuditLog(r, "agent_update_forced", true, map[string]interface{}{
+		"host_id": host.ID, "host_name": host.FriendlyName, "api_id": host.ApiID,
+	}); err != nil {
+		slog.Error("refusing forced agent update: audit log write failed", "error", err)
+		Error(w, http.StatusInternalServerError, "Failed to write audit log")
+		return
+	}
 	task, err := queue.NewUpdateAgentTask(host.ApiID, hostFromRequest(r), true) // bypass_settings=true for force update
 	if err != nil {
 		Error(w, http.StatusInternalServerError, "Failed to create agent update task")
@@ -703,10 +1053,12 @@ func (h *HostsHandler) BulkDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify all exist
+	// Verify all exist. GetByID returns (nil, nil) for "no such row", so the
+	// nil check is what actually enforces this; testing err alone let unknown
+	// ids through and reported a successful delete for them.
 	for _, id := range req.HostIds {
-		_, err := h.hosts.GetByID(r.Context(), id)
-		if err != nil {
+		existing, err := h.hosts.GetByID(r.Context(), id)
+		if err != nil || existing == nil {
 			Error(w, http.StatusNotFound, "Some hosts not found")
 			return
 		}
@@ -972,6 +1324,13 @@ func (h *HostsHandler) SetComplianceMode(w http.ResponseWriter, r *http.Request)
 	}
 	complianceEnabled := req.Mode != "disabled"
 	complianceOnDemandOnly := req.Mode == "on-demand"
+	if err := h.writeAuditLog(r, "compliance_config_requested", true, map[string]interface{}{
+		"host_id": host.ID, "host_name": host.FriendlyName, "change": "mode", "mode": req.Mode,
+	}); err != nil {
+		slog.Error("refusing compliance mode change: audit log write failed", "host_id", hostID, "error", err)
+		Error(w, http.StatusInternalServerError, "Failed to write audit log")
+		return
+	}
 	if err := h.pendingConfig.SetPendingConfig(r.Context(), hostID, store.PendingConfigFields{
 		ComplianceEnabled:      &complianceEnabled,
 		ComplianceOnDemandOnly: &complianceOnDemandOnly,
@@ -1009,8 +1368,11 @@ func (h *HostsHandler) SetComplianceScanners(w http.ResponseWriter, r *http.Requ
 		Error(w, http.StatusBadRequest, "At least one of openscap_enabled or docker_bench_enabled must be provided")
 		return
 	}
-	_, err := h.hosts.GetByID(r.Context(), hostID)
-	if err != nil {
+	// GetByID returns (nil, nil) for "no such row", so the nil check is what
+	// actually makes this a 404; testing err alone let an unknown id fall
+	// through to a no-op update reported as success.
+	existing, err := h.hosts.GetByID(r.Context(), hostID)
+	if err != nil || existing == nil {
 		Error(w, http.StatusNotFound, "Host not found")
 		return
 	}
@@ -1020,6 +1382,18 @@ func (h *HostsHandler) SetComplianceScanners(w http.ResponseWriter, r *http.Requ
 	}
 	if req.DockerBenchEnabled != nil {
 		fields.ComplianceDockerBenchEnabled = req.DockerBenchEnabled
+	}
+	auditDetail := map[string]interface{}{"host_id": existing.ID, "host_name": existing.FriendlyName, "change": "scanners"}
+	if req.OpenscapEnabled != nil {
+		auditDetail["openscap_enabled"] = *req.OpenscapEnabled
+	}
+	if req.DockerBenchEnabled != nil {
+		auditDetail["docker_bench_enabled"] = *req.DockerBenchEnabled
+	}
+	if err := h.writeAuditLog(r, "compliance_config_requested", true, auditDetail); err != nil {
+		slog.Error("refusing compliance scanner change: audit log write failed", "host_id", hostID, "error", err)
+		Error(w, http.StatusInternalServerError, "Failed to write audit log")
+		return
 	}
 	if err := h.pendingConfig.SetPendingConfig(r.Context(), hostID, fields); err != nil {
 		Error(w, http.StatusInternalServerError, "Failed to store pending scanner settings")
@@ -1049,9 +1423,25 @@ func (h *HostsHandler) SetComplianceDefaultProfile(w http.ResponseWriter, r *htt
 		Error(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-	_, err := h.hosts.GetByID(r.Context(), hostID)
-	if err != nil {
+	// GetByID returns (nil, nil) for "no such row", so the nil check is what
+	// actually makes this a 404; testing err alone let an unknown id fall
+	// through to a no-op update reported as success.
+	existing, err := h.hosts.GetByID(r.Context(), hostID)
+	if err != nil || existing == nil {
 		Error(w, http.StatusNotFound, "Host not found")
+		return
+	}
+	// Unlike mode/scanners this writes the hosts table directly (no pending
+	// step), so the audit row is the only record of who changed it.
+	var auditProfile interface{}
+	if req.ProfileID != nil {
+		auditProfile = auditText(*req.ProfileID)
+	}
+	if err := h.writeAuditLog(r, "compliance_config_requested", true, map[string]interface{}{
+		"host_id": existing.ID, "host_name": existing.FriendlyName, "change": "default_profile", "profile_id": auditProfile,
+	}); err != nil {
+		slog.Error("refusing compliance default profile change: audit log write failed", "host_id", hostID, "error", err)
+		Error(w, http.StatusInternalServerError, "Failed to write audit log")
 		return
 	}
 	if err := h.hosts.UpdateComplianceDefaultProfile(r.Context(), hostID, req.ProfileID); err != nil {
@@ -1100,6 +1490,13 @@ func (h *HostsHandler) ToggleIntegration(w http.ResponseWriter, r *http.Request)
 			fields.ComplianceOnDemandOnly = &host.ComplianceOnDemandOnly
 		}
 	}
+	if err := h.writeAuditLog(r, "integration_toggle_requested", true, map[string]interface{}{
+		"host_id": host.ID, "host_name": host.FriendlyName, "integration": integrationName, "enabled": req.Enabled,
+	}); err != nil {
+		slog.Error("refusing integration toggle: audit log write failed", "error", err)
+		Error(w, http.StatusInternalServerError, "Failed to write audit log")
+		return
+	}
 	if err := h.pendingConfig.SetPendingConfig(r.Context(), hostID, fields); err != nil {
 		Error(w, http.StatusInternalServerError, "Failed to store pending integration toggle")
 		return
@@ -1143,6 +1540,8 @@ func (h *HostsHandler) ApplyPendingConfig(w http.ResponseWriter, r *http.Request
 		Error(w, http.StatusServiceUnavailable, "Agent is not connected. Ensure the agent's server_url in config.yml points to this server.")
 		return
 	}
+	// This read only separates "nothing pending" (400) from "lost the claim
+	// to a concurrent Apply/Discard" (409); the values come from the claim.
 	pending, err := h.pendingConfig.GetPendingConfig(r.Context(), hostID)
 	if err != nil {
 		Error(w, http.StatusInternalServerError, "Failed to load pending config")
@@ -1153,71 +1552,68 @@ func (h *HostsHandler) ApplyPendingConfig(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Merge pending with host to get full config to apply
-	dockerEnabled := host.DockerEnabled
-	complianceEnabled := host.ComplianceEnabled
-	complianceOnDemandOnly := host.ComplianceOnDemandOnly
-	openscapEnabled := host.ComplianceOpenscapEnabled
-	dockerBenchEnabled := host.ComplianceDockerBenchEnabled
-	if pending.DockerEnabled != nil {
-		dockerEnabled = *pending.DockerEnabled
+	// Claim the pending row atomically before anything else. A concurrent
+	// Discard (or a second Apply) that got there first leaves nothing to
+	// claim: answer 409, write no audit row and never contact the agent.
+	claimed, err := h.pendingConfig.ClaimPendingConfig(r.Context(), hostID)
+	if err != nil {
+		slog.Error("apply-pending-config: claim failed", "host_id", hostID, "error", err)
+		Error(w, http.StatusInternalServerError, "Failed to claim pending config")
+		return
 	}
-	if pending.ComplianceEnabled != nil {
-		complianceEnabled = *pending.ComplianceEnabled
+	if claimed == nil {
+		slog.Info("apply-pending-config: pending config already applied or discarded", "host_id", hostID)
+		JSON(w, http.StatusConflict, map[string]string{
+			"error": "Pending configuration was already applied or discarded",
+			"code":  "pending_config_gone",
+		})
+		return
 	}
-	if pending.ComplianceOnDemandOnly != nil {
-		complianceOnDemandOnly = *pending.ComplianceOnDemandOnly
+	cfg := mergePendingConfig(host, claimed)
+	if err := h.writeAuditLog(r, "integration_config_applied", true, map[string]interface{}{
+		"host_id": host.ID, "host_name": host.FriendlyName,
+		"docker": cfg.docker, "compliance": cfg.complianceValue(),
+		"openscap_enabled": cfg.openscap, "docker_bench_enabled": cfg.dockerBench,
+	}); err != nil {
+		slog.Error("refusing apply-pending-config: audit log write failed", "host_id", hostID, "error", err)
+		// Fail closed: nothing was sent, so the pending change stays in place.
+		h.restorePendingConfig(r, hostID, claimed)
+		Error(w, http.StatusInternalServerError, "Failed to write audit log")
+		return
 	}
-	if pending.ComplianceOpenscapEnabled != nil {
-		openscapEnabled = *pending.ComplianceOpenscapEnabled
-	}
-	if pending.ComplianceDockerBenchEnabled != nil {
-		dockerBenchEnabled = *pending.ComplianceDockerBenchEnabled
-	}
-
-	// Build compliance value for agent: "on-demand", true, or false
-	var complianceVal interface{}
-	if !complianceEnabled {
-		complianceVal = false
-	} else if complianceOnDemandOnly {
-		complianceVal = "on-demand"
-	} else {
-		complianceVal = true
-	}
-
 	msg := map[string]interface{}{
 		"type": "apply_config",
 		"config": map[string]interface{}{
-			"docker": dockerEnabled,
+			"docker": cfg.docker,
 			"compliance": map[string]interface{}{
-				"enabled":              complianceVal,
-				"openscap_enabled":     openscapEnabled,
-				"docker_bench_enabled": dockerBenchEnabled,
+				"enabled":              cfg.complianceValue(),
+				"openscap_enabled":     cfg.openscap,
+				"docker_bench_enabled": cfg.dockerBench,
 			},
 		},
 	}
 	if err := h.registry.SendJSON(host.ApiID, msg); err != nil {
 		slog.Error("apply-pending-config: failed to send to agent", "host_id", hostID, "api_id", host.ApiID, "error", err)
+		// The agent never got the config: put the claimed change back so it
+		// can be applied again or discarded.
+		h.restorePendingConfig(r, hostID, claimed)
 		Error(w, http.StatusServiceUnavailable, "Failed to send config to agent")
 		return
 	}
 	slog.Info("apply-pending-config: sent apply_config to agent", "host_id", hostID, "api_id", host.ApiID)
 
-	// Apply to hosts table
-	if err := h.hosts.UpdateDockerEnabled(r.Context(), hostID, dockerEnabled); err != nil {
+	// Apply to hosts table. No restore on failure here: the agent already
+	// has the config.
+	if err := h.hosts.UpdateDockerEnabled(r.Context(), hostID, cfg.docker); err != nil {
 		Error(w, http.StatusInternalServerError, "Failed to update host")
 		return
 	}
-	if err := h.hosts.UpdateComplianceMode(r.Context(), hostID, complianceEnabled, complianceOnDemandOnly); err != nil {
+	if err := h.hosts.UpdateComplianceMode(r.Context(), hostID, cfg.complianceEnabled, cfg.complianceOnDemandOnly); err != nil {
 		Error(w, http.StatusInternalServerError, "Failed to update compliance mode")
 		return
 	}
-	if err := h.hosts.UpdateComplianceScanners(r.Context(), hostID, openscapEnabled, dockerBenchEnabled); err != nil {
+	if err := h.hosts.UpdateComplianceScanners(r.Context(), hostID, cfg.openscap, cfg.dockerBench); err != nil {
 		Error(w, http.StatusInternalServerError, "Failed to update scanner settings")
-		return
-	}
-	if err := h.pendingConfig.ClearPendingConfig(r.Context(), hostID); err != nil {
-		Error(w, http.StatusInternalServerError, "Failed to clear pending config")
 		return
 	}
 
@@ -1227,13 +1623,130 @@ func (h *HostsHandler) ApplyPendingConfig(w http.ResponseWriter, r *http.Request
 	})
 }
 
+// DiscardPendingConfig handles DELETE /hosts/:hostId/integrations/pending-config.
+// Drops the stored pending integration changes without contacting the agent.
+// Idempotent: without pending changes it answers 200 and writes no audit row.
+// With pending changes the audit row is written first (fail-closed).
+func (h *HostsHandler) DiscardPendingConfig(w http.ResponseWriter, r *http.Request) {
+	hostID := chi.URLParam(r, "hostId")
+	host, ok := h.requireHost(w, r, hostID)
+	if !ok {
+		return
+	}
+	// Claim first (discard is server-only): a concurrent Apply that already
+	// claimed the change leaves nothing here, so both can never succeed.
+	claimed, err := h.pendingConfig.ClaimPendingConfig(r.Context(), hostID)
+	if err != nil {
+		Error(w, http.StatusInternalServerError, "Failed to claim pending config")
+		return
+	}
+	if claimed == nil {
+		JSON(w, http.StatusOK, map[string]interface{}{
+			"success": true,
+			"message": "No pending configuration",
+		})
+		return
+	}
+	detail := map[string]interface{}{"host_id": host.ID, "host_name": host.FriendlyName}
+	for key, val := range map[string]*bool{
+		"docker":                    claimed.DockerEnabled,
+		"compliance":                claimed.ComplianceEnabled,
+		"compliance_on_demand_only": claimed.ComplianceOnDemandOnly,
+		"openscap_enabled":          claimed.ComplianceOpenscapEnabled,
+		"docker_bench_enabled":      claimed.ComplianceDockerBenchEnabled,
+	} {
+		if val != nil {
+			detail[key] = *val
+		}
+	}
+	if err := h.writeAuditLog(r, "integration_config_discarded", true, detail); err != nil {
+		slog.Error("refusing discard-pending-config: audit log write failed", "host_id", hostID, "error", err)
+		// Fail closed: without an audit row the pending change stays in place.
+		h.restorePendingConfig(r, hostID, claimed)
+		Error(w, http.StatusInternalServerError, "Failed to write audit log")
+		return
+	}
+	JSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"message": "Pending configuration discarded",
+	})
+}
+
+// mergedIntegrationConfig is the full integration config after merging a
+// pending row over the host's current values.
+type mergedIntegrationConfig struct {
+	docker                 bool
+	complianceEnabled      bool
+	complianceOnDemandOnly bool
+	openscap               bool
+	dockerBench            bool
+}
+
+func mergePendingConfig(host *models.Host, pc *db.HostPendingConfig) mergedIntegrationConfig {
+	c := mergedIntegrationConfig{
+		docker:                 host.DockerEnabled,
+		complianceEnabled:      host.ComplianceEnabled,
+		complianceOnDemandOnly: host.ComplianceOnDemandOnly,
+		openscap:               host.ComplianceOpenscapEnabled,
+		dockerBench:            host.ComplianceDockerBenchEnabled,
+	}
+	if pc.DockerEnabled != nil {
+		c.docker = *pc.DockerEnabled
+	}
+	if pc.ComplianceEnabled != nil {
+		c.complianceEnabled = *pc.ComplianceEnabled
+	}
+	if pc.ComplianceOnDemandOnly != nil {
+		c.complianceOnDemandOnly = *pc.ComplianceOnDemandOnly
+	}
+	if pc.ComplianceOpenscapEnabled != nil {
+		c.openscap = *pc.ComplianceOpenscapEnabled
+	}
+	if pc.ComplianceDockerBenchEnabled != nil {
+		c.dockerBench = *pc.ComplianceDockerBenchEnabled
+	}
+	return c
+}
+
+// complianceValue is the agent's compliance setting: "on-demand", true or false.
+func (c mergedIntegrationConfig) complianceValue() interface{} {
+	if !c.complianceEnabled {
+		return false
+	}
+	if c.complianceOnDemandOnly {
+		return "on-demand"
+	}
+	return true
+}
+
+// restorePendingConfig puts a claimed pending row back (best effort) after a
+// step that must not consume it failed. Known edge: a toggle stored between
+// the claim and this restore is overwritten by the claimed values (upsert).
+// It runs on a detached context: a request cancelled after the claim must not
+// lose the pending change together with the failed audit or send.
+func (h *HostsHandler) restorePendingConfig(r *http.Request, hostID string, pc *db.HostPendingConfig) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+	defer cancel()
+	if err := h.pendingConfig.SetPendingConfig(ctx, hostID, store.PendingConfigFields{
+		DockerEnabled:                pc.DockerEnabled,
+		ComplianceEnabled:            pc.ComplianceEnabled,
+		ComplianceOnDemandOnly:       pc.ComplianceOnDemandOnly,
+		ComplianceOpenscapEnabled:    pc.ComplianceOpenscapEnabled,
+		ComplianceDockerBenchEnabled: pc.ComplianceDockerBenchEnabled,
+	}); err != nil {
+		slog.Warn("failed to restore claimed pending config", "host_id", hostID, "error", err)
+	}
+}
+
 func hostToResponse(h *models.Host, groups []models.HostGroup) map[string]interface{} {
 	res := map[string]interface{}{
 		"id": h.ID, "friendly_name": h.FriendlyName, "hostname": h.Hostname, "ip": h.IP,
 		"os_type": h.OSType, "os_version": h.OSVersion, "architecture": h.Architecture,
 		"last_update": h.LastUpdate, "status": h.Status, "api_id": h.ApiID, "agent_version": h.AgentVersion,
 		"auto_update": h.AutoUpdate, "created_at": h.CreatedAt, "notes": h.Notes,
-		"system_uptime": h.SystemUptime, "needs_reboot": h.NeedsReboot,
+		"system_uptime": h.SystemUptime, "needs_reboot": h.NeedsReboot, "allow_reboot": h.AllowReboot,
+		"pkg_broken": h.PkgBroken, "pkg_broken_detail": h.PkgBrokenDetail,
+		"boot_time":      h.BootTime,
 		"docker_enabled": h.DockerEnabled, "compliance_enabled": h.ComplianceEnabled,
 		"package_manager": h.PackageManager, "primary_interface": h.PrimaryInterface,
 		"awaiting_post_patch_report_run_id": h.AwaitingPostPatchReportRunID,

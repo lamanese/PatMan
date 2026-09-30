@@ -236,7 +236,7 @@ When enabled, the agent installs OpenSCAP and SCAP Security Guide content. Avail
 
 ### SSH Proxy
 
-Enables browser-based SSH sessions through the agent. Must be enabled manually in `config.yml` for security reasons — it cannot be pushed from the server.
+Enables browser-based SSH sessions through the agent. Must be enabled manually in `config.yml` for security reasons — it cannot be pushed from the server. Since 2.0.21 the agent actively refuses this key when a server sends it (only `docker` and `compliance` are server-managed), and the proxy only ever connects to `localhost`; a host sent by the server is ignored. The server side additionally requires `PM_ENABLE_REMOTE_ACCESS=true`.
 
 ```yaml
 integrations:
@@ -245,7 +245,7 @@ integrations:
 
 ### RDP Proxy
 
-Enables browser-based RDP sessions through the agent (relaying traffic via the `guacd` sidecar on the server). Must be enabled manually in `config.yml`.
+Enables browser-based RDP sessions through the agent (relaying traffic via the `guacd` sidecar on the server). Must be enabled manually in `config.yml`; like the SSH proxy it is refused when sent by the server (2.0.21+), only connects to `localhost`, and requires `PM_ENABLE_REMOTE_ACCESS=true` on the server.
 
 ```yaml
 integrations:

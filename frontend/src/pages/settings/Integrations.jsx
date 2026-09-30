@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 import { Link } from "react-router-dom";
+import { PRODUCT_NAME_SHORT } from "../../constants/branding";
 import api, { dashboardAPI, formatDate, settingsAPI } from "../../utils/api";
 
 // Checkmk CSV export: format per https://docs.checkmk.com/latest/en/hosts_setup.html#import
@@ -223,6 +224,16 @@ const Integrations = () => {
 
 	const server_url = serverUrlData?.server_url || window.location.origin;
 	const curl_flags = settings?.ignore_ssl_self_signed ? "-sk" : "-s";
+	// Windows enrollment: the script is fetched over HTTPS by PowerShell, so a
+	// self-signed server certificate needs the validation callback first.
+	// A function, not a value: it reads new_token, which only exists right
+	// after a token was created (the page itself renders without one).
+	const getWindowsEnrollmentCommand = () =>
+		`${
+			settings?.ignore_ssl_self_signed
+				? "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }; "
+				: ""
+		}irm "${getEnrollmentUrl("direct-host-windows")}" | iex`;
 
 	// biome-ignore lint/correctness/useExhaustiveDependencies: Only run on mount
 	useEffect(() => {
@@ -857,7 +868,7 @@ const Integrations = () => {
 										Proxmox hosts.
 									</p>
 									<a
-										href="https://patchmon.net/docs/patchmon-api-integrations-guide#proxmox-lxc-auto-enrollment-guide"
+										href="https://github.com/lamanese/PatMan/blob/feat/remote-reboot/docs/patchmon-api-integrations-guide.md#proxmox-lxc-auto-enrollment-guide"
 										target="_blank"
 										rel="noopener noreferrer"
 										className="inline-flex items-center gap-2 px-3 py-2 bg-primary-600 hover:bg-primary-700 dark:bg-primary-500 dark:hover:bg-primary-600 text-white rounded-lg text-sm transition-colors"
@@ -1066,7 +1077,7 @@ const Integrations = () => {
 										infrastructure.
 									</p>
 									<a
-										href="https://patchmon.net/docs/patchmon-api-integrations-guide#proxmox-lxc-auto-enrollment-guide"
+										href="https://github.com/lamanese/PatMan/blob/feat/remote-reboot/docs/patchmon-api-integrations-guide.md#proxmox-lxc-auto-enrollment-guide"
 										target="_blank"
 										rel="noopener noreferrer"
 										className="inline-flex items-center gap-2 px-3 py-2 bg-primary-600 hover:bg-primary-700 dark:bg-primary-500 dark:hover:bg-primary-600 text-white rounded-lg text-sm transition-colors"
@@ -1261,12 +1272,12 @@ const Integrations = () => {
 										</h4>
 									</div>
 									<p className="text-sm text-secondary-600 dark:text-white mb-3">
-										Programmatic access to PatchMon data with granular
-										scope-based permissions.
+										Programmatic access to {PRODUCT_NAME_SHORT} data with
+										granular scope-based permissions.
 									</p>
 									<div className="flex flex-wrap gap-2">
 										<a
-											href="https://patchmon.net/docs/patchmon-api-integrations-guide#integration-api-documentation"
+											href="https://github.com/lamanese/PatMan/blob/feat/remote-reboot/docs/patchmon-api-integrations-guide.md#integration-api-documentation"
 											target="_blank"
 											rel="noopener noreferrer"
 											className="inline-flex items-center gap-2 px-3 py-2 bg-primary-600 hover:bg-primary-700 dark:bg-primary-500 dark:hover:bg-primary-600 text-white rounded-lg text-sm transition-colors"
@@ -1303,8 +1314,8 @@ const Integrations = () => {
 											GetHomepage Widget Integration
 										</h3>
 										<p className="text-xs md:text-sm text-secondary-600 dark:text-white">
-											Create API keys to display PatchMon statistics in your
-											GetHomepage dashboard
+											Create API keys to display {PRODUCT_NAME_SHORT} statistics
+											in your GetHomepage dashboard
 										</p>
 									</div>
 								</div>
@@ -1440,7 +1451,7 @@ const Integrations = () => {
 										How to Use GetHomepage Integration
 									</h3>
 									<a
-										href="https://patchmon.net/docs/patchmon-api-integrations-guide#gethomepage-dashboard-card"
+										href="https://github.com/lamanese/PatMan/blob/feat/remote-reboot/docs/patchmon-api-integrations-guide.md#gethomepage-dashboard-card"
 										target="_blank"
 										rel="noopener noreferrer"
 										className="px-4 py-2 bg-primary-600 hover:bg-primary-700 dark:bg-primary-500 dark:hover:bg-primary-600 text-white rounded-lg flex items-center gap-2 transition-colors w-full sm:w-auto justify-center sm:justify-start"
@@ -1701,7 +1712,7 @@ const Integrations = () => {
 
 							<div className="bg-secondary-50 dark:bg-secondary-800/50 rounded-lg border border-secondary-200 dark:border-secondary-700 p-4 md:p-6">
 								<p className="text-sm text-secondary-600 dark:text-white mb-4">
-									Export your PatchMon host list in the{" "}
+									Export your {PRODUCT_NAME_SHORT} host list in the{" "}
 									<a
 										href="https://docs.checkmk.com/latest/en/hosts_setup.html#import"
 										target="_blank"
@@ -2326,7 +2337,7 @@ const Integrations = () => {
 										<div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
 											<input
 												type="text"
-												value={`curl ${curl_flags} "${getEnrollmentUrl("direct-host")}" | sh`}
+												value={`curl ${curl_flags} "${getEnrollmentUrl("direct-host")}" | sudo sh`}
 												readOnly
 												className="flex-1 px-3 py-2 border border-secondary-300 dark:border-secondary-600 rounded-md bg-secondary-50 dark:bg-secondary-900 text-secondary-900 dark:text-white font-mono text-xs break-all"
 											/>
@@ -2334,7 +2345,7 @@ const Integrations = () => {
 												type="button"
 												onClick={() =>
 													copy_to_clipboard(
-														`curl ${curl_flags} "${getEnrollmentUrl("direct-host")}" | sh`,
+														`curl ${curl_flags} "${getEnrollmentUrl("direct-host")}" | sudo sh`,
 														"direct-enrollment-command",
 													)
 												}
@@ -2357,8 +2368,55 @@ const Integrations = () => {
 										<p className="text-xs text-secondary-500 dark:text-white mt-3 p-2 bg-blue-50 dark:bg-blue-900/20 rounded border border-blue-200 dark:border-blue-800">
 											💡 <strong>Tip:</strong> Specify a custom name:{" "}
 											<code className="text-xs bg-secondary-200 dark:bg-secondary-700 px-1 py-0.5 rounded">
-												FRIENDLY_NAME="My Server" sh
+												FRIENDLY_NAME="My Server" sudo sh
 											</code>
+										</p>
+
+										<div className="block text-sm font-medium text-secondary-700 dark:text-white mt-5 mb-2">
+											Windows (PowerShell as Administrator)
+										</div>
+										<p className="text-xs text-secondary-600 dark:text-white mb-2">
+											Run this in an elevated PowerShell on the Windows host. It
+											enrolls the machine with this token and installs the
+											agent.
+										</p>
+										<div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+											<input
+												type="text"
+												value={getWindowsEnrollmentCommand()}
+												readOnly
+												className="flex-1 px-3 py-2 border border-secondary-300 dark:border-secondary-600 rounded-md bg-secondary-50 dark:bg-secondary-900 text-secondary-900 dark:text-white font-mono text-xs break-all"
+											/>
+											<button
+												type="button"
+												onClick={() =>
+													copy_to_clipboard(
+														getWindowsEnrollmentCommand(),
+														"direct-enrollment-command-windows",
+													)
+												}
+												className="btn-primary flex items-center justify-center gap-1 px-3 py-2 whitespace-nowrap"
+											>
+												{copy_success["direct-enrollment-command-windows"] ? (
+													<>
+														<CheckCircle className="h-4 w-4" />
+														Copied
+													</>
+												) : (
+													<>
+														<Copy className="h-4 w-4" />
+														Copy
+													</>
+												)}
+											</button>
+										</div>
+										<p className="text-xs text-secondary-500 dark:text-white mt-3 p-2 bg-blue-50 dark:bg-blue-900/20 rounded border border-blue-200 dark:border-blue-800">
+											💡 <strong>Tip:</strong> Custom name on Windows: run{" "}
+											<code className="text-xs bg-secondary-200 dark:bg-secondary-700 px-1 py-0.5 rounded">
+												$env:FRIENDLY_NAME = "My Server"
+											</code>{" "}
+											first. A name that already exists gets a numeric suffix
+											(web01-2); a machine that is already enrolled is refused.
 										</p>
 									</div>
 								)}

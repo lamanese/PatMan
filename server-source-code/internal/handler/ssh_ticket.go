@@ -45,7 +45,35 @@ func (h *SshTicketHandler) ServeCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ticket, err := h.tickets.CreateTicket(r.Context(), userID, req.HostID)
+	if !isValidUUID(req.HostID) {
+		JSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid host ID"})
+		return
+	}
+
+	// The host must exist before an audit row or a ticket is written.
+	host, err := h.hosts.GetByID(r.Context(), req.HostID)
+	if err != nil || host == nil {
+		JSON(w, http.StatusNotFound, map[string]string{"error": "Host not found"})
+		return
+	}
+	hostName := req.HostID
+	if host.FriendlyName != "" {
+		hostName = host.FriendlyName
+	} else if host.Hostname != nil && *host.Hostname != "" {
+		hostName = *host.Hostname
+	}
+
+	// Fail-closed: no audit row, no ticket.
+	if err := auditFromRequest(r, h.db.DB(r.Context()), "ssh_ticket_issued", map[string]interface{}{
+		"host_id":      req.HostID,
+		"host_name":    hostName,
+		"ticket_ttl_s": int(store.SshTicketTTL.Seconds()),
+	}); err != nil {
+		Error(w, http.StatusInternalServerError, "Failed to write audit log")
+		return
+	}
+
+	ticket, err := h.tickets.CreateTicket(r.Context(), userID, host.ID)
 	if err != nil {
 		JSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to generate SSH ticket"})
 		return
@@ -54,14 +82,6 @@ func (h *SshTicketHandler) ServeCreate(w http.ResponseWriter, r *http.Request) {
 	// Emit ssh_session_started event.
 	if h.notify != nil {
 		if d := h.db.DB(r.Context()); d != nil {
-			hostName := req.HostID
-			if host, err := h.hosts.GetByID(r.Context(), req.HostID); err == nil && host != nil {
-				if host.FriendlyName != "" {
-					hostName = host.FriendlyName
-				} else if host.Hostname != nil && *host.Hostname != "" {
-					hostName = *host.Hostname
-				}
-			}
 			h.notify.EmitEvent(r.Context(), d, hostctx.TenantHostKey(r.Context()), notifications.Event{
 				Type:          "ssh_session_started",
 				Severity:      "informational",
@@ -80,6 +100,6 @@ func (h *SshTicketHandler) ServeCreate(w http.ResponseWriter, r *http.Request) {
 
 	JSON(w, http.StatusOK, map[string]interface{}{
 		"ticket":    ticket,
-		"expiresIn": 30,
+		"expiresIn": int(store.SshTicketTTL.Seconds()),
 	})
 }

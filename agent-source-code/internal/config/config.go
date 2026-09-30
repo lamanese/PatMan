@@ -66,6 +66,26 @@ var AvailableIntegrations = []string{
 	// Future: "proxmox", "kubernetes", etc.
 }
 
+// ServerManagedIntegrations are the only integration keys a server may change
+// (integration toggles, startup sync, apply_config). ssh-proxy-enabled and
+// rdp-proxy-enabled are local-only by design: they turn the agent into a
+// network relay and must be switched on by hand in config.yml.
+var ServerManagedIntegrations = []string{"docker", "compliance"}
+
+// ErrIntegrationNotServerManaged is returned when a server tries to change an
+// integration that is local-only.
+var ErrIntegrationNotServerManaged = errors.New("integration is not server-managed")
+
+// IsServerManagedIntegration reports whether a server may change name.
+func IsServerManagedIntegration(name string) bool {
+	for _, n := range ServerManagedIntegrations {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
 // Manager handles configuration management
 type Manager struct {
 	config      *models.Config
@@ -367,6 +387,7 @@ func (m *Manager) SaveConfig() error {
 	configViper.Set("log_file", m.config.LogFile)
 	configViper.Set("log_level", m.config.LogLevel)
 	configViper.Set("skip_ssl_verify", m.config.SkipSSLVerify)
+	configViper.Set("allow_reboot_insecure_transport", m.config.AllowRebootInsecure)
 	configViper.Set("update_interval", m.config.UpdateInterval)
 	configViper.Set("report_offset", m.config.ReportOffset)
 	configViper.Set("package_cache_refresh_mode", m.config.PackageCacheRefreshMode)
@@ -503,6 +524,16 @@ func (m *Manager) SetIntegrationEnabled(name string, enabled bool) error {
 		m.config.Integrations[name] = enabled
 	}
 	return m.SaveConfig()
+}
+
+// SetIntegrationEnabledFromServer is SetIntegrationEnabled for changes that
+// originate from the server. It refuses everything outside
+// ServerManagedIntegrations without touching memory or config.yml.
+func (m *Manager) SetIntegrationEnabledFromServer(name string, enabled bool) error {
+	if !IsServerManagedIntegration(name) {
+		return fmt.Errorf("%w: %q", ErrIntegrationNotServerManaged, name)
+	}
+	return m.SetIntegrationEnabled(name, enabled)
 }
 
 // ComplianceMode represents the three possible states for compliance integration

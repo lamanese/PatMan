@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PatchMon/PatchMon/server-source-code/internal/agentregistry"
@@ -50,6 +51,50 @@ type RDPHandler struct {
 	log            *slog.Logger
 	db             database.DBProvider
 	notify         *notifications.Emitter
+	// openSessions maps the guac tunnel ConnectionID to the opened session,
+	// so the tunnel's OnDisconnect hook can write rdp_session_closed.
+	openSessions sync.Map
+}
+
+// rdpOpenSession is what the close hook needs to audit an RDP session.
+type rdpOpenSession struct {
+	userID, hostID, sessionID string
+	started                   time.Time
+}
+
+// closedDetail builds the rdp_session_closed audit detail.
+func (s rdpOpenSession) closedDetail(now time.Time) map[string]interface{} {
+	return map[string]interface{}{
+		"host_id":    s.hostID,
+		"session_id": s.sessionID,
+		"user_id":    s.userID,
+		"duration_s": int(now.Sub(s.started).Seconds()),
+	}
+}
+
+// auditSession writes a best-effort RDP session audit row on a context that
+// ignores cancellation (the tunnel may already be gone), bounded by a 5 s
+// timeout. ip/ua are empty for the close row.
+func (h *RDPHandler) auditSession(ctx context.Context, event, ip, ua, userID string, detail map[string]interface{}) {
+	if h.db == nil {
+		return
+	}
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := insertAudit(actx, h.db.DB(actx), event, &userID, ip, ua, nil, detail); err != nil {
+		h.log.Warn("rdp audit write failed", "event", event, "user_id", userID, "error", err)
+	}
+}
+
+// onTunnelDisconnect is the guac OnDisconnect hook: it writes
+// rdp_session_closed for a session opened by doGuacConnect.
+func (h *RDPHandler) onTunnelDisconnect(id string, r *http.Request, _ guac.Tunnel) {
+	v, ok := h.openSessions.LoadAndDelete(id)
+	if !ok {
+		return
+	}
+	s := v.(rdpOpenSession)
+	h.auditSession(r.Context(), "rdp_session_closed", "", "", s.userID, s.closedDetail(time.Now()))
 }
 
 // NewRDPHandler creates a new RDP handler.
@@ -220,6 +265,22 @@ func (h *RDPHandler) ServeCreateTicket(w http.ResponseWriter, r *http.Request) {
 		_ = probe.Close()
 	}
 
+	hostName := host.FriendlyName
+	if hostName == "" && host.Hostname != nil {
+		hostName = *host.Hostname
+	}
+
+	// Fail-closed: no audit row, no proxy session. Written before the session
+	// is created so no rdp_proxy reaches the agent (and no TCP connect to
+	// 3389 happens) without a row. rdp_session_opened carries the session id.
+	if err := auditFromRequest(r, h.db.DB(r.Context()), "rdp_ticket_issued", map[string]interface{}{
+		"host_id":   host.ID,
+		"host_name": hostName,
+	}); err != nil {
+		Error(w, http.StatusInternalServerError, "Failed to write audit log")
+		return
+	}
+
 	sessionID, port, err := h.rdpSessions.Create(r.Context(), host.ApiID, host.ID)
 	if err != nil {
 		if errors.Is(err, rdpproxy.ErrMaxSessionsReached) {
@@ -314,10 +375,6 @@ func (h *RDPHandler) ServeCreateTicket(w http.ResponseWriter, r *http.Request) {
 	// Emit rdp_session_started event.
 	if h.notify != nil {
 		if d := h.db.DB(r.Context()); d != nil {
-			hostName := host.FriendlyName
-			if hostName == "" && host.Hostname != nil {
-				hostName = *host.Hostname
-			}
 			h.notify.EmitEvent(r.Context(), d, hostctx.TenantHostKey(r.Context()), notifications.Event{
 				Type:          "rdp_session_started",
 				Severity:      "informational",
@@ -409,6 +466,7 @@ func classifyAgentError(msg string) string {
 // It wraps the guac WebSocket server with origin validation to prevent cross-origin hijacking.
 func (h *RDPHandler) WebsocketTunnelHandler() http.Handler {
 	guacWSHandler := guac.NewWebsocketServer(h.doGuacConnect)
+	guacWSHandler.OnDisconnect = h.onTunnelDisconnect
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Validate Origin header before handing off to guac's WebSocket upgrader.
@@ -546,8 +604,19 @@ func (h *RDPHandler) doGuacConnect(r *http.Request) (guac.Tunnel, error) {
 		"missing_username_or_password", data.Username == "" || data.Password == "",
 	)
 
+	h.auditSession(r.Context(), "rdp_session_opened", clientIPFromRequest(r), r.UserAgent(), data.UserID, map[string]interface{}{
+		"host_id": data.HostID, "session_id": data.SessionID, "user_id": data.UserID,
+	})
+
+	// guac calls OnDisconnect with tunnel.ConnectionID() (the guacd
+	// connection id set by the handshake above) once the tunnel ends.
+	tunnel := guac.NewSimpleTunnel(stream)
+	h.openSessions.Store(tunnel.ConnectionID(), rdpOpenSession{
+		userID: data.UserID, hostID: data.HostID, sessionID: data.SessionID, started: time.Now(),
+	})
+
 	// Clean up session when tunnel closes (handled by caller)
-	return guac.NewSimpleTunnel(stream), nil
+	return tunnel, nil
 }
 
 // WebsocketTunnelHandlerWithQuery builds the WebSocket URL with ticket and params.

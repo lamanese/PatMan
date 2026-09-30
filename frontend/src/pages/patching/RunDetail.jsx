@@ -2,10 +2,13 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
 	AlertTriangle,
 	ArrowLeft,
+	CheckCheck,
 	CheckCircle2,
 	Copy,
+	Pencil,
 	PlayCircle,
 	RefreshCw,
+	RotateCcw,
 	Server,
 	Shield,
 	Square,
@@ -19,7 +22,9 @@ import {
 	PackageListDisplay,
 	PackageNameList,
 } from "../../components/PackageListDisplay";
+import PatchRunHelp from "../../components/PatchRunHelp";
 import { PatchRunStatusBadge } from "../../components/PatchRunStatusBadge";
+import SolveRunDialog from "../../components/patching/SolveRunDialog";
 import { useToast } from "../../contexts/ToastContext";
 import { formatDate } from "../../utils/api";
 import { buildRunStreamURL, patchingAPI } from "../../utils/patchingApi";
@@ -33,6 +38,7 @@ const LIVE_STATUSES = new Set(["running"]);
 const TERMINAL_STATUSES = new Set([
 	"completed",
 	"failed",
+	"solved",
 	"cancelled",
 	"validated",
 	"dry_run_completed",
@@ -104,6 +110,9 @@ const RunDetail = () => {
 	const [approvingId, setApprovingId] = useState(null);
 	const [stopConfirmOpen, setStopConfirmOpen] = useState(false);
 	const [stopError, setStopError] = useState(null);
+	// Fork: "solved" dialog; mode "solve" marks a failed run, "note" edits the
+	// note of a solved run.
+	const [solveDialog, setSolveDialog] = useState(null);
 
 	// Live output buffer built from the WebSocket snapshot + chunks. When the
 	// run is still active this is the source-of-truth for the terminal view;
@@ -140,6 +149,40 @@ const RunDetail = () => {
 			queryClient.invalidateQueries({ queryKey: ["patching-run", id] });
 			queryClient.invalidateQueries({ queryKey: ["patching-runs"] });
 		},
+	});
+	const invalidateRun = () => {
+		queryClient.invalidateQueries({ queryKey: ["patching-run", id] });
+		queryClient.invalidateQueries({ queryKey: ["patching-runs"] });
+		queryClient.invalidateQueries({ queryKey: ["patching-dashboard"] });
+	};
+	const solveMutation = useMutation({
+		mutationFn: ({ runId, note }) => patchingAPI.solveRun(runId, note),
+		onSuccess: () => {
+			invalidateRun();
+			setSolveDialog(null);
+			toast.success("Run marked as solved");
+		},
+		onError: (err) =>
+			toast.error(err?.response?.data?.error || "Could not mark run as solved"),
+	});
+	const noteMutation = useMutation({
+		mutationFn: ({ runId, note }) => patchingAPI.updateSolvedNote(runId, note),
+		onSuccess: () => {
+			invalidateRun();
+			setSolveDialog(null);
+			toast.success("Note saved");
+		},
+		onError: (err) =>
+			toast.error(err?.response?.data?.error || "Could not save the note"),
+	});
+	const reopenMutation = useMutation({
+		mutationFn: (runId) => patchingAPI.reopenRun(runId),
+		onSuccess: () => {
+			invalidateRun();
+			toast.success("Run reopened");
+		},
+		onError: (err) =>
+			toast.error(err?.response?.data?.error || "Could not reopen the run"),
 	});
 	const [retryingId, setRetryingId] = useState(null);
 
@@ -504,8 +547,86 @@ const RunDetail = () => {
 					Stop Run
 				</button>
 			)}
+			{run.status === "failed" && (
+				<button
+					type="button"
+					onClick={() => setSolveDialog({ mode: "solve" })}
+					disabled={solveMutation.isPending}
+					className="btn-primary inline-flex items-center gap-1.5 min-h-[44px] disabled:opacity-50 disabled:cursor-not-allowed"
+				>
+					<CheckCheck className="h-4 w-4" />
+					Mark as solved
+				</button>
+			)}
+			{run.status === "solved" && (
+				<button
+					type="button"
+					onClick={() => reopenMutation.mutate(id)}
+					disabled={reopenMutation.isPending}
+					className="btn-outline inline-flex items-center gap-1.5 min-h-[44px] disabled:opacity-50 disabled:cursor-not-allowed"
+				>
+					<RotateCcw
+						className={`h-4 w-4 ${reopenMutation.isPending ? "animate-spin" : ""}`}
+					/>
+					{reopenMutation.isPending ? "Reopening…" : "Reopen"}
+				</button>
+			)}
 		</>
 	);
+
+	// Fork: who solved the run, when, and the note. The failure output and
+	// the suggested fixes below stay exactly as they were.
+	const solvedBox =
+		run.status === "solved" ? (
+			<div className="rounded-lg border border-teal-200 dark:border-teal-800 bg-teal-50 dark:bg-teal-900/20 p-4">
+				<div className="flex items-start justify-between gap-3">
+					<div className="min-w-0">
+						<div className="flex items-center gap-2 text-sm font-semibold text-teal-800 dark:text-teal-200">
+							<CheckCheck className="h-4 w-4 flex-shrink-0" />
+							Solved
+							{run.fork_solved_at && (
+								<span className="font-normal text-teal-700 dark:text-teal-300">
+									{formatDate(run.fork_solved_at)}
+								</span>
+							)}
+						</div>
+						<p className="mt-1 text-sm text-teal-900 dark:text-teal-100">
+							{run.fork_solved_by_run_id ? (
+								<>
+									Solved automatically by a later successful run:{" "}
+									<Link
+										to={`/patching/runs/${run.fork_solved_by_run_id}`}
+										className="underline"
+									>
+										open that run
+									</Link>
+								</>
+							) : (
+								<>Solved by {run.fork_solved_by_username || "an operator"}</>
+							)}
+						</p>
+						{run.fork_solved_note ? (
+							<p className="mt-2 text-sm text-secondary-800 dark:text-secondary-100 whitespace-pre-wrap break-words">
+								{run.fork_solved_note}
+							</p>
+						) : (
+							<p className="mt-2 text-sm text-secondary-500 dark:text-secondary-400 italic">
+								No note yet.
+							</p>
+						)}
+					</div>
+					<button
+						type="button"
+						onClick={() => setSolveDialog({ mode: "note" })}
+						className="btn-outline inline-flex items-center gap-1.5 min-h-[44px] flex-shrink-0"
+						title="Edit the note"
+					>
+						<Pencil className="h-4 w-4" />
+						<span className="hidden sm:inline">Edit note</span>
+					</button>
+				</div>
+			</div>
+		) : null;
 
 	return (
 		<div className="space-y-6">
@@ -530,6 +651,8 @@ const RunDetail = () => {
 					{headerActions}
 				</div>
 			</div>
+
+			{solvedBox}
 
 			{/* Two-pane layout: summary sidebar (left) + primary content (right) */}
 			<div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -761,6 +884,9 @@ const RunDetail = () => {
 								)}
 							</div>
 						</div>
+						{!LIVE_STATUSES.has(run.status) && (
+							<PatchRunHelp output={shellDisplay} className="mb-3" />
+						)}
 						<div className="flex-1 min-h-0 rounded-lg border border-secondary-700 dark:border-secondary-600 bg-[#0d1117] dark:bg-black overflow-hidden shadow-inner">
 							<pre
 								ref={outputRef}
@@ -780,6 +906,31 @@ const RunDetail = () => {
 					</div>
 				</div>
 			</div>
+
+			{solveDialog && (
+				<SolveRunDialog
+					open
+					title={solveDialog.mode === "note" ? "Edit note" : "Mark as solved"}
+					confirmLabel={
+						solveDialog.mode === "note" ? "Save note" : "Mark as solved"
+					}
+					description={
+						solveDialog.mode === "note"
+							? undefined
+							: `Marks this failed run on ${hostName} as solved. It no longer counts as failed.`
+					}
+					initialNote={
+						solveDialog.mode === "note" ? run.fork_solved_note || "" : ""
+					}
+					isPending={solveMutation.isPending || noteMutation.isPending}
+					onClose={() => setSolveDialog(null)}
+					onConfirm={(note) =>
+						solveDialog.mode === "note"
+							? noteMutation.mutate({ runId: id, note })
+							: solveMutation.mutate({ runId: id, note })
+					}
+				/>
+			)}
 
 			{/* Stop confirm modal (§9.1 + §9.4 warning badge) */}
 			{stopConfirmOpen && (

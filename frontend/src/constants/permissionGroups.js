@@ -12,6 +12,7 @@ import {
 	Package,
 	PackageSearch,
 	PencilRuler,
+	Power,
 	Send,
 	Server,
 	Settings,
@@ -134,8 +135,16 @@ export const PERMISSION_GROUPS = [
 			{
 				key: "can_use_remote_access",
 				label: "Remote Access",
-				description: "SSH and RDP terminal access to managed hosts",
+				description:
+					"SSH and RDP terminal access to managed hosts (only effective when the server runs with PM_ENABLE_REMOTE_ACCESS=true)",
 				icon: Terminal,
+			},
+			{
+				key: "can_reboot_hosts",
+				label: "Reboot Hosts",
+				description:
+					"Remote-reboot allowlisted hosts and manage reboot schedules",
+				icon: Power,
 			},
 		],
 	},

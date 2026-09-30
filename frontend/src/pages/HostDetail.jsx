@@ -43,6 +43,7 @@ import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import InlineEdit from "../components/InlineEdit";
 import InlineMultiGroupEdit from "../components/InlineMultiGroupEdit";
 import { PackageListDisplay } from "../components/PackageListDisplay";
+import { CopyCommandButton } from "../components/PatchRunHelp";
 import { PatchRunStatusBadge } from "../components/PatchRunStatusBadge";
 import PatchWizard from "../components/PatchWizard";
 import RdpViewer from "../components/RdpViewer";
@@ -65,6 +66,7 @@ import {
 import { complianceAPI } from "../utils/complianceApi";
 import { OSIcon } from "../utils/osIcons.jsx";
 import { patchingAPI } from "../utils/patchingApi";
+import { isRemoteAccessEnabled } from "../utils/remoteAccess";
 import AgentQueueTab from "./hostdetail/AgentQueueTab";
 import CredentialsModal from "./hostdetail/CredentialsModal";
 import DeleteConfirmationModal from "./hostdetail/DeleteConfirmationModal";
@@ -96,7 +98,7 @@ const HostDetail = () => {
 	const location = useLocation();
 	const queryClient = useQueryClient();
 	const toast = useToast();
-	const { canManageHosts, hasModule } = useAuth();
+	const { canManageHosts, canUseRemoteAccess, hasModule } = useAuth();
 	const [showCredentialsModal, setShowCredentialsModal] = useState(false);
 
 	// Get plaintext API key from navigation state (only available immediately after host creation)
@@ -217,6 +219,11 @@ const HostDetail = () => {
 		},
 	});
 
+	// Terminal/RDP need can_use_remote_access AND the server flag
+	// PM_ENABLE_REMOTE_ACCESS (read fail-closed); the server enforces both.
+	const remoteAccessAllowed =
+		canUseRemoteAccess() && isRemoteAccessEnabled(settings);
+
 	// WebSocket connection status using polling (secure - uses httpOnly cookies)
 	const [wsStatus, setWsStatus] = useState(null);
 
@@ -277,26 +284,24 @@ const HostDetail = () => {
 	// Open requested tab when navigating with state (e.g. from Compliance page link)
 	useEffect(() => {
 		const requestedTab = location.state?.tab;
-		if (
-			requestedTab &&
-			[
-				"host",
-				"network",
-				"system",
-				"history",
-				"queue",
-				"notes",
-				"integrations",
-				"reporting",
-				"docker",
-				"compliance",
-				"terminal",
-				"rdp",
-			].includes(requestedTab)
-		) {
+		const allowedTabs = [
+			"host",
+			"network",
+			"system",
+			"history",
+			"queue",
+			"notes",
+			"integrations",
+			"reporting",
+			"docker",
+			"compliance",
+			"terminal",
+			"rdp",
+		].filter((t) => remoteAccessAllowed || (t !== "terminal" && t !== "rdp"));
+		if (requestedTab && allowedTabs.includes(requestedTab)) {
 			setActiveTab(requestedTab);
 		}
-	}, [location.state?.tab]);
+	}, [location.state?.tab, remoteAccessAllowed]);
 
 	// Auto-show credentials modal for new/pending hosts (skip if just arrived from Add Host wizard)
 	useEffect(() => {
@@ -315,6 +320,15 @@ const HostDetail = () => {
 	const isWindowsHost = (host?.os_type || host?.expected_platform || "")
 		.toLowerCase()
 		.includes("windows");
+
+	// fork: PM_IGNORE_DEFINITION_UPDATES - show a hint under the update counters
+	// when this host has pending Windows Defender definition updates that the
+	// server is not counting as outstanding.
+	const hasUncountedDefinitionUpdates =
+		settings?.ignore_definition_updates === true &&
+		(host?.host_packages || []).some(
+			(pkg) => pkg.is_definition_update && pkg.needs_update,
+		);
 	const isFreeBSDHost =
 		(host?.package_manager || "").toLowerCase() === "pkg" ||
 		(host?.os_type || host?.expected_platform || "")
@@ -937,6 +951,15 @@ const HostDetail = () => {
 			);
 		},
 		onError: (error) => {
+			// 409: someone else applied or discarded this change first. The
+			// server did not send anything; refresh and close the dialog.
+			if (error.response?.status === 409) {
+				queryClient.invalidateQueries(["host-integrations", hostId]);
+				refetchIntegrations();
+				setShowApplyConfigModal(false);
+				toast.error("Pending configuration was already applied or discarded");
+				return;
+			}
 			refetchIntegrations();
 			const msg =
 				error.response?.data?.error ||
@@ -949,6 +972,37 @@ const HostDetail = () => {
 			);
 		},
 	});
+
+	// Discard pending config mutation (server-only, agent need not be connected)
+	const discardPendingConfigMutation = useMutation({
+		mutationFn: () =>
+			adminHostsAPI.discardPendingConfig(hostId).then((res) => res.data),
+		onSuccess: (data) => {
+			queryClient.invalidateQueries(["host-integrations", hostId]);
+			refetchIntegrations();
+			setShowApplyConfigModal(false);
+			// 200 without a claimed row: someone else applied or discarded first.
+			if (data?.message === "No pending configuration") {
+				toast.info("No pending configuration to discard");
+				return;
+			}
+			toast.success("Pending configuration changes discarded.");
+		},
+		onError: (error) => {
+			refetchIntegrations();
+			const msg =
+				error.response?.data?.error ||
+				error.response?.data?.message ||
+				error.message;
+			toast.error(`Failed to discard: ${msg}`);
+		},
+	});
+
+	// Apply and discard must not race each other: while either request is in
+	// flight, both buttons stay disabled.
+	const pendingConfigBusy =
+		applyPendingConfigMutation.isPending ||
+		discardPendingConfigMutation.isPending;
 
 	// Set compliance mode mutation (three-state: disabled, on-demand, enabled)
 	const setComplianceModeMutation = useMutation({
@@ -1245,6 +1299,15 @@ const HostDetail = () => {
 									Reboot Required
 								</span>
 							)}
+							{host.pkg_broken && (
+								<span
+									className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200"
+									title={`Affected packages: ${host.pkg_broken_detail || "unknown"}. An earlier package installation was interrupted. An administrator has to run "sudo dpkg --configure -a" and "sudo apt-get -f install" in a terminal on the host. PatchMon does not repair this.`}
+								>
+									<AlertTriangle className="h-3 w-3" />
+									Package installation incomplete
+								</span>
+							)}
 							{host.awaiting_post_patch_report_run_id && (
 								<Link
 									to={`/patching/runs/${host.awaiting_post_patch_report_run_id}`}
@@ -1256,6 +1319,34 @@ const HostDetail = () => {
 								</Link>
 							)}
 						</div>
+						{host.pkg_broken && (
+							<div className="max-w-2xl rounded-md border border-red-200 bg-red-50 dark:border-red-800 dark:bg-red-900/30 px-3 py-2 text-xs text-red-900 dark:text-red-100">
+								<p className="font-medium">
+									An earlier package installation on this host was interrupted
+									{host.pkg_broken_detail ? ` (${host.pkg_broken_detail})` : ""}
+									. Patch runs will fail until an administrator finishes it in a
+									terminal on the host. PatchMon does not repair this.
+								</p>
+								<div className="mt-1 flex items-start gap-2">
+									<CopyCommandButton
+										text={
+											"sudo dpkg --configure -a\nsudo apt-get -f install\nsudo dpkg --audit"
+										}
+										className="flex-shrink-0"
+									/>
+									<pre className="select-all whitespace-pre-wrap font-mono">
+										{
+											"sudo dpkg --configure -a\nsudo apt-get -f install\nsudo dpkg --audit"
+										}
+									</pre>
+								</div>
+								<p className="mt-1">
+									If dpkg asks about a modified configuration file, keeping the
+									local version (N, the default) leaves the current settings
+									untouched. The notice disappears with the next agent report.
+								</p>
+							</div>
+						)}
 						{/* Info row with uptime and last updated */}
 						<div className="flex items-center gap-4 text-sm text-secondary-600 dark:text-white">
 							{host.system_uptime && (
@@ -1263,6 +1354,12 @@ const HostDetail = () => {
 									<Clock className="h-3.5 w-3.5" />
 									<span className="text-xs font-medium">Uptime:</span>
 									<span className="text-xs">{host.system_uptime}</span>
+								</div>
+							)}
+							{host.boot_time && (
+								<div className="flex items-center gap-1">
+									<span className="text-xs font-medium">Last boot:</span>
+									<span className="text-xs">{formatDate(host.boot_time)}</span>
 								</div>
 							)}
 							<div className="flex items-center gap-1">
@@ -1280,7 +1377,7 @@ const HostDetail = () => {
 						<button
 							type="button"
 							onClick={() => setShowApplyConfigModal(true)}
-							disabled={!wsStatus?.connected}
+							disabled={!wsStatus?.connected || pendingConfigBusy}
 							className="btn-outline flex items-center gap-2 text-sm whitespace-nowrap border-warning-300 dark:border-warning-600 text-warning-700 dark:text-warning-300 hover:bg-warning-50 dark:hover:bg-warning-900/20"
 							title={
 								!wsStatus?.connected
@@ -1290,6 +1387,18 @@ const HostDetail = () => {
 						>
 							<Send className="h-4 w-4" />
 							<span className="hidden sm:inline">Apply</span>
+						</button>
+					)}
+					{integrationsData?.pending_config_exists && canManageHosts() && (
+						<button
+							type="button"
+							onClick={() => discardPendingConfigMutation.mutate()}
+							disabled={pendingConfigBusy}
+							className="btn-outline flex items-center gap-2 text-sm whitespace-nowrap"
+							title="Discard pending configuration changes (nothing is sent to the agent)"
+						>
+							<RotateCcw className="h-4 w-4" />
+							<span className="hidden sm:inline">Discard changes</span>
 						</button>
 					)}
 					<div className="flex-1 min-w-0 flex items-center gap-2 flex-wrap">
@@ -1312,7 +1421,7 @@ const HostDetail = () => {
 							<span className="hidden sm:inline">Fetch Report</span>
 							<span className="sm:hidden">Fetch</span>
 						</button>
-						{canManageHosts() && !isWindowsHost && (
+						{canManageHosts() && (
 							<button
 								type="button"
 								onClick={() => setShowPatchConfirmModal(true)}
@@ -1451,6 +1560,12 @@ const HostDetail = () => {
 					</div>
 				</button>
 			</div>
+
+			{hasUncountedDefinitionUpdates && (
+				<p className="text-xs text-secondary-500 dark:text-white -mt-4 mb-6">
+					Definition updates are not counted (PM_IGNORE_DEFINITION_UPDATES)
+				</p>
+			)}
 
 			{/* Main Content - Full Width */}
 			<div className="flex-1 md:overflow-hidden">
@@ -1886,7 +2001,7 @@ const HostDetail = () => {
 											</div>
 										)}
 
-										{host.selinux_status && (
+										{host.selinux_status && !isWindowsHost && (
 											<div>
 												<p className="text-xs text-secondary-500 dark:text-white">
 													SELinux Status
@@ -1935,6 +2050,11 @@ const HostDetail = () => {
 												<p className="font-medium text-secondary-900 dark:text-white text-sm">
 													{host.system_uptime}
 												</p>
+												{host.boot_time && (
+													<p className="text-xs text-secondary-500 dark:text-white mt-1">
+														Last boot: {formatDate(host.boot_time)}
+													</p>
+												)}
 											</div>
 										)}
 
@@ -2633,21 +2753,23 @@ const HostDetail = () => {
 								)}
 							</button>
 						)}
-						<button
-							type="button"
-							onClick={() => handleTabChange("terminal")}
-							className={`px-4 py-2 text-sm font-medium inline-flex items-center gap-2 ${
-								activeTab === "terminal"
-									? "text-primary-600 dark:text-primary-400 border-b-2 border-primary-500"
-									: "text-secondary-500 dark:text-white hover:text-secondary-700 dark:hover:text-primary-400"
-							}`}
-						>
-							Terminal
-							{!hasModule("ssh_terminal") && (
-								<TierBadge tier={getRequiredTier("ssh_terminal")} />
-							)}
-						</button>
-						{isWindowsHost && (
+						{remoteAccessAllowed && (
+							<button
+								type="button"
+								onClick={() => handleTabChange("terminal")}
+								className={`px-4 py-2 text-sm font-medium inline-flex items-center gap-2 ${
+									activeTab === "terminal"
+										? "text-primary-600 dark:text-primary-400 border-b-2 border-primary-500"
+										: "text-secondary-500 dark:text-white hover:text-secondary-700 dark:hover:text-primary-400"
+								}`}
+							>
+								Terminal
+								{!hasModule("ssh_terminal") && (
+									<TierBadge tier={getRequiredTier("ssh_terminal")} />
+								)}
+							</button>
+						)}
+						{remoteAccessAllowed && isWindowsHost && (
 							<button
 								type="button"
 								onClick={() => handleTabChange("rdp")}
@@ -3135,7 +3257,7 @@ const HostDetail = () => {
 												</div>
 											)}
 
-											{host.selinux_status && (
+											{host.selinux_status && !isWindowsHost && (
 												<div>
 													<p className="text-xs text-secondary-500 dark:text-white">
 														SELinux Status
@@ -3201,6 +3323,11 @@ const HostDetail = () => {
 													<p className="font-medium text-secondary-900 dark:text-white text-sm">
 														{host.system_uptime}
 													</p>
+													{host.boot_time && (
+														<p className="text-xs text-secondary-500 dark:text-white mt-1">
+															Last boot: {formatDate(host.boot_time)}
+														</p>
+													)}
 												</div>
 											)}
 
@@ -3638,7 +3765,7 @@ const HostDetail = () => {
 						    isn't in the tenant's plan, render the upgrade content
 						    instead so the tab is discoverable rather than silently
 						    broken. Backend ticket endpoints still return 403. */}
-						{host && hasModule("ssh_terminal") && (
+						{host && remoteAccessAllowed && hasModule("ssh_terminal") && (
 							<div className={activeTab === "terminal" ? "" : "hidden"}>
 								<SshTerminal
 									host={host}
@@ -3648,19 +3775,30 @@ const HostDetail = () => {
 								/>
 							</div>
 						)}
-						{activeTab === "terminal" && !hasModule("ssh_terminal") && (
-							<UpgradeRequiredContent module="ssh_terminal" variant="inline" />
-						)}
+						{remoteAccessAllowed &&
+							activeTab === "terminal" &&
+							!hasModule("ssh_terminal") && (
+								<UpgradeRequiredContent
+									module="ssh_terminal"
+									variant="inline"
+								/>
+							)}
 
 						{/* RDP - Windows hosts only. Gated by the rdp module (Max tier). */}
-						{host && isWindowsHost && hasModule("rdp") && (
-							<div className={activeTab === "rdp" ? "" : "hidden"}>
-								<RdpViewer host={host} isOpen={activeTab === "rdp"} />
-							</div>
-						)}
-						{activeTab === "rdp" && isWindowsHost && !hasModule("rdp") && (
-							<UpgradeRequiredContent module="rdp" variant="inline" />
-						)}
+						{host &&
+							remoteAccessAllowed &&
+							isWindowsHost &&
+							hasModule("rdp") && (
+								<div className={activeTab === "rdp" ? "" : "hidden"}>
+									<RdpViewer host={host} isOpen={activeTab === "rdp"} />
+								</div>
+							)}
+						{remoteAccessAllowed &&
+							activeTab === "rdp" &&
+							isWindowsHost &&
+							!hasModule("rdp") && (
+								<UpgradeRequiredContent module="rdp" variant="inline" />
+							)}
 
 						{/* Notes */}
 						{activeTab === "notes" && (
@@ -3796,6 +3934,20 @@ const HostDetail = () => {
 														Agent must be connected to apply pending
 														configuration changes
 													</p>
+												)}
+												{canManageHosts() && (
+													<button
+														type="button"
+														onClick={() =>
+															discardPendingConfigMutation.mutate()
+														}
+														disabled={pendingConfigBusy}
+														className="btn-outline mt-3 flex items-center gap-2 text-sm whitespace-nowrap"
+														title="Discard pending configuration changes (nothing is sent to the agent)"
+													>
+														<RotateCcw className="h-4 w-4" />
+														Discard changes
+													</button>
 												)}
 											</div>
 										)}
@@ -5071,6 +5223,7 @@ const HostDetail = () => {
 										<option value="running">Running</option>
 										<option value="completed">Completed</option>
 										<option value="failed">Failed</option>
+										<option value="solved">Solved</option>
 										<option value="cancelled">Cancelled</option>
 									</select>
 								</div>
@@ -5593,7 +5746,16 @@ const HostDetail = () => {
 														<RefreshCw className="h-4 w-4" />
 														Refresh status
 													</button>
-													{complianceSetupStatus?.status?.status !== "ready" &&
+													{isWindowsHost && (
+														<span
+															className="text-xs text-secondary-500 dark:text-white"
+															title="The compliance scanner is OpenSCAP-based and requires a Debian-, RHEL- or SUSE-family Linux system"
+														>
+															Not available on Windows (OpenSCAP is Linux-only)
+														</span>
+													)}
+													{!isWindowsHost &&
+														complianceSetupStatus?.status?.status !== "ready" &&
 														complianceSetupStatus?.status?.status !==
 															"partial" &&
 														wsStatus?.connected &&
@@ -6072,6 +6234,7 @@ const HostDetail = () => {
 							id: hostId,
 							friendly_name: host?.friendly_name,
 							hostname: host?.hostname,
+							os_type: host?.os_type,
 						},
 					]}
 					onSuccess={handlePatchWizardSuccess}
@@ -6182,6 +6345,26 @@ const HostDetail = () => {
 							>
 								Cancel
 							</button>
+							{canManageHosts() && (
+								<button
+									type="button"
+									onClick={() => discardPendingConfigMutation.mutate()}
+									disabled={pendingConfigBusy}
+									className="px-4 py-2 text-sm font-medium text-secondary-700 dark:text-secondary-200 bg-white dark:bg-secondary-600 border border-secondary-300 dark:border-secondary-500 rounded-md hover:bg-secondary-50 dark:hover:bg-secondary-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+								>
+									{discardPendingConfigMutation.isPending ? (
+										<>
+											<Loader2 className="h-4 w-4 animate-spin" />
+											Discarding...
+										</>
+									) : (
+										<>
+											<RotateCcw className="h-4 w-4" />
+											Discard changes
+										</>
+									)}
+								</button>
+							)}
 							<button
 								type="button"
 								onClick={() => {
@@ -6189,9 +6372,7 @@ const HostDetail = () => {
 										onSuccess: () => setShowApplyConfigModal(false),
 									});
 								}}
-								disabled={
-									applyPendingConfigMutation.isPending || !wsStatus?.connected
-								}
+								disabled={pendingConfigBusy || !wsStatus?.connected}
 								className="px-4 py-2 text-sm font-medium text-white bg-warning-600 hover:bg-warning-700 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
 							>
 								{applyPendingConfigMutation.isPending ? (

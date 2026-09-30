@@ -91,6 +91,19 @@ export const patchingAPI = {
 		api.post(`/patching/runs/${id}/retry-validation`).then((res) => res.data),
 	stopRun: (id) =>
 		api.post(`/patching/runs/${id}/stop`).then((res) => res.data),
+	// Fork: failed runs can be marked as solved (and reopened).
+	solveRun: (id, note = "") =>
+		api.post(`/patching/runs/${id}/solve`, { note }).then((res) => res.data),
+	reopenRun: (id) =>
+		api.post(`/patching/runs/${id}/reopen`).then((res) => res.data),
+	updateSolvedNote: (id, note = "") =>
+		api
+			.patch(`/patching/runs/${id}/solved-note`, { note })
+			.then((res) => res.data),
+	bulkSolveRuns: (ids, note = "") =>
+		api
+			.post("/patching/runs/bulk-solve", { ids, note })
+			.then((res) => res.data),
 	deleteRun: (id) => api.delete(`/patching/runs/${id}`),
 	getPreviewRun: (host_id) =>
 		api

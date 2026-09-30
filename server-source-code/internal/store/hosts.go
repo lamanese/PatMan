@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/PatchMon/PatchMon/server-source-code/internal/database"
@@ -10,6 +11,7 @@ import (
 	"github.com/PatchMon/PatchMon/server-source-code/internal/pgtime"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/safeconv"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // HostsStore provides host access via sqlc.
@@ -64,7 +66,9 @@ func (s *HostsStore) ListPaginated(ctx context.Context, limit, offset int) ([]mo
 			CreatedAt:         pgTime(r.CreatedAt),
 			Notes:             r.Notes,
 			SystemUptime:      r.SystemUptime,
+			BootTime:          r.ForkBootTime,
 			NeedsReboot:       r.NeedsReboot,
+			AllowReboot:       r.AllowReboot,
 			DockerEnabled:     r.DockerEnabled,
 			ComplianceEnabled: r.ComplianceEnabled,
 		}
@@ -80,6 +84,18 @@ func (s *HostsStore) Count(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	return int(n), nil
+}
+
+// CountByStatus returns the active and pending host counts. The license gate
+// counts active+pending (a slot is reserved at creation time), the license
+// display shows active only.
+func (s *HostsStore) CountByStatus(ctx context.Context) (active int, pending int, err error) {
+	d := s.db.DB(ctx)
+	row, err := d.Queries.CountHostsByStatus(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	return int(row.ActiveCount), int(row.PendingCount), nil
 }
 
 // GetByID returns a host by ID.
@@ -202,6 +218,17 @@ func (s *HostsStore) UpdateAutoUpdate(ctx context.Context, id string, autoUpdate
 	return d.Queries.UpdateHostAutoUpdate(ctx, db.UpdateHostAutoUpdateParams{
 		AutoUpdate: autoUpdate,
 		ID:         id,
+	})
+}
+
+// UpdateAllowReboot updates the allow_reboot flag for a set of hosts.
+// Remote reboot is allowlist-based: only hosts with allow_reboot = true
+// can be rebooted via the bulk reboot endpoint.
+func (s *HostsStore) UpdateAllowReboot(ctx context.Context, ids []string, allow bool) error {
+	d := s.db.DB(ctx)
+	return d.Queries.UpdateHostsAllowReboot(ctx, db.UpdateHostsAllowRebootParams{
+		AllowReboot: allow,
+		Ids:         ids,
 	})
 }
 
@@ -412,7 +439,8 @@ func (s *HostsStore) ListForScopedApi(ctx context.Context, groupIDs []string, in
 	}
 
 	if includeStats && len(hostIDs) > 0 {
-		rows, err := d.Queries.GetHostPackageStatsByHostIDs(ctx, hostIDs)
+		// fork: PM_IGNORE_DEFINITION_UPDATES - keep in agreement with GetHostPackageStats
+		rows, err := d.Queries.GetHostPackageStatsByHostIDs(ctx, db.GetHostPackageStatsByHostIDsParams{HostIds: hostIDs, IgnoreDefinitionUpdates: d.IgnoreDefinitionUpdates()})
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -427,4 +455,25 @@ func (s *HostsStore) ListForScopedApi(ctx context.Context, groupIDs []string, in
 	}
 
 	return hosts, groupsMap, statsMap, nil
+}
+
+// ForkFindByMachineID returns the id and friendly name of the host enrolled
+// with this machine id, or found=false. Used by auto-enrollment to refuse a
+// second host for the same machine.
+func (s *HostsStore) ForkFindByMachineID(ctx context.Context, machineID string) (id, friendlyName string, found bool, err error) {
+	row, err := s.db.DB(ctx).Queries.ForkGetHostByMachineID(ctx, &machineID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, err
+	}
+	return row.ID, row.FriendlyName, true, nil
+}
+
+// ForkFriendlyNamesLike lists the friendly names that could collide with a
+// new host called name: the name itself or the name with a suffix, ignoring
+// case.
+func (s *HostsStore) ForkFriendlyNamesLike(ctx context.Context, name string) ([]string, error) {
+	return s.db.DB(ctx).Queries.ForkListHostFriendlyNamesLike(ctx, name)
 }

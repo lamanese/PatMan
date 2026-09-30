@@ -307,3 +307,79 @@ UPDATE patch_runs
 SET status = 'cancelled', error_message = $2, completed_at = NOW(), updated_at = NOW()
 WHERE status = 'running'
   AND started_at < $1;
+
+-- Fork additions below - do not edit CancelStalledPatchRuns above so an
+-- upstream sync never conflicts on it; the fork's patch-run-cleanup job
+-- (internal/queue/workers.go) uses the two queries below instead, which
+-- close the gaps CancelStalledPatchRuns has: it never matches 'running' rows
+-- whose started_at is NULL (a code path can reset a run to 'running' without
+-- setting it - see cleanupDB's comment), and it has no notion of any other
+-- status ever getting stuck (queued/pending_validation forever if a host
+-- never reconnects, pending_approval/validated/approved forever if nobody
+-- approves them).
+
+-- name: ForkCancelStaleRunningPatchRuns :execrows
+-- COALESCE(started_at, updated_at, created_at) covers a 'running' row whose
+-- started_at was left NULL by a status reset that didn't also set it.
+UPDATE patch_runs
+SET status = 'cancelled', error_message = sqlc.arg('error_message'), completed_at = NOW(), updated_at = NOW()
+WHERE status = 'running'
+  AND COALESCE(started_at, updated_at, created_at) < sqlc.arg('threshold');
+
+-- name: ForkCancelStaleWaitingPatchRuns :execrows
+-- Generic "stuck in a non-terminal, non-running status" reaper, parameterised
+-- by which statuses and threshold the caller wants (queued/pending_validation
+-- at 24h, or pending_approval/validated/approved at 7 days - see cleanupDB).
+-- updated_at is bumped by every write to the row (every UPDATE ... patch_runs
+-- query above sets it), so GREATEST(updated_at, scheduled_at) never reaps a
+-- run before its own scheduled_at plus the caller's threshold has elapsed.
+UPDATE patch_runs
+SET status = 'cancelled', error_message = sqlc.arg('error_message'), completed_at = NOW(), updated_at = NOW()
+WHERE status = ANY(sqlc.arg('statuses')::text[])
+  AND GREATEST(updated_at, COALESCE(scheduled_at, updated_at)) < sqlc.arg('threshold');
+
+-- name: ForkSolvePatchRun :execrows
+-- Fork: an operator marks a failed run as solved; output and error stay.
+UPDATE patch_runs
+SET status = 'solved', fork_solved_at = NOW(), fork_solved_by = sqlc.narg('user_id'), fork_solved_note = sqlc.narg('note'),
+    fork_solved_by_run_id = NULL, updated_at = NOW()
+WHERE id = sqlc.arg('id') AND status = 'failed';
+
+-- name: ForkBulkSolvePatchRuns :many
+-- Fork: same as ForkSolvePatchRun for a list of ids; returns the ids that changed.
+UPDATE patch_runs
+SET status = 'solved', fork_solved_at = NOW(), fork_solved_by = sqlc.narg('user_id'), fork_solved_note = sqlc.narg('note'),
+    fork_solved_by_run_id = NULL, updated_at = NOW()
+WHERE id = ANY(sqlc.arg('ids')::text[]) AND status = 'failed'
+RETURNING id;
+
+-- name: ForkReopenPatchRun :execrows
+-- Fork: back to failed; the note is kept as history.
+UPDATE patch_runs
+SET status = 'failed', fork_solved_at = NULL, fork_solved_by = NULL, fork_solved_by_run_id = NULL, updated_at = NOW()
+WHERE id = sqlc.arg('id') AND status = 'solved';
+
+-- name: ForkUpdatePatchRunSolvedNote :execrows
+UPDATE patch_runs SET fork_solved_note = sqlc.narg('note'), updated_at = NOW()
+WHERE id = sqlc.arg('id') AND status = 'solved';
+
+-- name: ForkAutoSolvePatchRuns :many
+-- Fork: a completed real run solves the older failed runs of its host:
+-- patch_all solves every failed run, patch_package only failed runs with the
+-- same package selection. Returns the ids that were solved.
+UPDATE patch_runs f
+SET status = 'solved', fork_solved_at = NOW(), fork_solved_by = NULL, fork_solved_by_run_id = c.id,
+    fork_solved_note = 'Solved automatically: a later run on this host completed.', updated_at = NOW()
+FROM patch_runs c
+WHERE c.id = sqlc.arg('completed_run_id') AND c.status = 'completed' AND c.dry_run = false
+  AND f.host_id = c.host_id AND f.status = 'failed' AND f.created_at < c.created_at
+  AND (c.patch_type = 'patch_all'
+       OR (f.patch_type = c.patch_type
+           AND f.package_name IS NOT DISTINCT FROM c.package_name
+           AND COALESCE(f.package_names, 'null'::jsonb) = COALESCE(c.package_names, 'null'::jsonb)))
+RETURNING f.id;
+
+-- name: ForkGetPatchRunSolvedByUsername :one
+-- Fork: who solved the run (NULL for automatic or deleted users).
+SELECT u.username FROM patch_runs pr LEFT JOIN users u ON u.id = pr.fork_solved_by WHERE pr.id = sqlc.arg('id');
+

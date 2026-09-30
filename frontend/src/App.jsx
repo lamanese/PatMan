@@ -1,5 +1,5 @@
 import { lazy, Suspense } from "react";
-import { Outlet, Route, Routes } from "react-router-dom";
+import { Navigate, Outlet, Route, Routes } from "react-router-dom";
 import ErrorBoundary from "./components/ErrorBoundary";
 import FirstTimeWizard from "./components/FirstTimeWizard";
 import Layout from "./components/Layout";
@@ -62,6 +62,7 @@ const SettingsServerConfig = lazy(
 	() => import("./pages/settings/SettingsServerConfig"),
 );
 const SettingsMetrics = lazy(() => import("./pages/settings/SettingsMetrics"));
+const SettingsLicense = lazy(() => import("./pages/settings/SettingsLicense"));
 const EnvironmentSettings = lazy(
 	() => import("./pages/settings/EnvironmentSettings"),
 );
@@ -69,6 +70,7 @@ const AiSettings = lazy(() => import("./pages/settings/AiSettings"));
 const DiscordSettings = lazy(() => import("./pages/settings/DiscordSettings"));
 const OidcSettings = lazy(() => import("./pages/settings/OidcSettings"));
 const Billing = lazy(() => import("./pages/Billing"));
+const Schedules = lazy(() => import("./pages/Schedules"));
 
 // Full-screen loading fallback (for initial app load / auth check)
 const LoadingFallback = () => (
@@ -204,6 +206,28 @@ function AppRoutes() {
 								<Automation />
 							</ProtectedRoute>
 						}
+					/>
+					<Route
+						path="/schedules"
+						element={
+							<ProtectedRoute
+								requireAnyPermissions={[
+									"can_manage_patching",
+									"can_reboot_hosts",
+								]}
+							>
+								<Schedules />
+							</ProtectedRoute>
+						}
+					/>
+					{/* Old standalone schedule pages, kept as redirects for bookmarks and doc links */}
+					<Route
+						path="/reboot-schedules"
+						element={<Navigate to="/schedules?tab=reboot" replace />}
+					/>
+					<Route
+						path="/patch-schedules"
+						element={<Navigate to="/schedules?tab=patch" replace />}
 					/>
 					<Route
 						path="/patching"
@@ -343,14 +367,10 @@ function AppRoutes() {
 					<Route
 						path="/settings"
 						element={
-							<ProtectedRoute
-								requireAnyPermissions={[
-									"can_view_users",
-									"can_manage_notifications",
-									"can_view_notification_logs",
-									"can_manage_settings",
-								]}
-							>
+							// No permission here on purpose: "My Profile" (password, TFA,
+							// sessions) and the read-only licence page belong to every
+							// signed-in user. All other children carry their own guard.
+							<ProtectedRoute>
 								<SettingsLayout>
 									<Suspense fallback={<PageLoadingFallback />}>
 										<Outlet />
@@ -488,6 +508,14 @@ function AppRoutes() {
 							element={
 								<ProtectedRoute requirePermission="can_manage_settings">
 									<SettingsMetrics />
+								</ProtectedRoute>
+							}
+						/>
+						<Route
+							path="license"
+							element={
+								<ProtectedRoute>
+									<SettingsLicense />
 								</ProtectedRoute>
 							}
 						/>
