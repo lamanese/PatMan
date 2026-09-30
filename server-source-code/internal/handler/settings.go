@@ -51,7 +51,7 @@ func (h *SettingsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		Error(w, http.StatusInternalServerError, "Failed to load settings")
 		return
 	}
-	JSON(w, http.StatusOK, settingsToResponse(s, h.enc, h.cfg != nil && h.cfg.DisableSignup, h.cfg != nil && h.cfg.HideCommunityLinks, h.cfg != nil && h.cfg.IgnoreDefinitionUpdates))
+	JSON(w, http.StatusOK, settingsToResponse(s, h.enc, h.cfg != nil && h.cfg.DisableSignup, h.cfg != nil && h.cfg.HideCommunityLinks, h.cfg != nil && h.cfg.IgnoreDefinitionUpdates, h.cfg != nil && h.cfg.EnableRemoteAccess))
 }
 
 // GetServerURL handles GET /settings/server-url (public, used by install commands and Add Host wizard).
@@ -735,10 +735,10 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	JSON(w, http.StatusOK, settingsToResponse(s, h.enc, h.cfg != nil && h.cfg.DisableSignup, h.cfg != nil && h.cfg.HideCommunityLinks, h.cfg != nil && h.cfg.IgnoreDefinitionUpdates))
+	JSON(w, http.StatusOK, settingsToResponse(s, h.enc, h.cfg != nil && h.cfg.DisableSignup, h.cfg != nil && h.cfg.HideCommunityLinks, h.cfg != nil && h.cfg.IgnoreDefinitionUpdates, h.cfg != nil && h.cfg.EnableRemoteAccess))
 }
 
-func settingsToResponse(s *models.Settings, enc *util.Encryption, signupLocked bool, forkMode bool, ignoreDefinitionUpdates bool) map[string]interface{} {
+func settingsToResponse(s *models.Settings, enc *util.Encryption, signupLocked bool, forkMode bool, ignoreDefinitionUpdates bool, remoteAccessEnabled bool) map[string]interface{} {
 	discordSecretSet := false
 	if s.DiscordClientSecret != nil && *s.DiscordClientSecret != "" && enc != nil {
 		_, err := enc.Decrypt(*s.DiscordClientSecret)
@@ -768,6 +768,7 @@ func settingsToResponse(s *models.Settings, enc *util.Encryption, signupLocked b
 		"update_available": updateAvailable,
 		"signup_enabled":   s.SignupEnabled, "default_user_role": s.DefaultUserRole,
 		"signup_locked":          signupLocked,
+		"remote_access_enabled":  remoteAccessEnabled,
 		"ignore_ssl_self_signed": s.IgnoreSSLSelfSigned,
 		"logo_dark":              s.LogoDark, "logo_light": s.LogoLight, "favicon": s.Favicon,
 		"metrics_enabled": metricsEnabled, "metrics_anonymous_id": s.MetricsAnonymousID,

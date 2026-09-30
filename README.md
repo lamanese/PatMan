@@ -26,7 +26,7 @@ Reporting
 
 Security and operation
 - Client-IP resolution behind trusted proxies (`TRUSTED_PROXY_RANGES`), auth hardening, failed-login logging, host licensing (`PM_LICENSE_*`).
-- **Fork mode** (`PM_HIDE_COMMUNITY_LINKS=true`): no upstream links, no version beacons, no telemetry. `PM_DISABLE_SIGNUP`, `PM_IGNORE_DEFINITION_UPDATES`.
+- **Fork mode** (`PM_HIDE_COMMUNITY_LINKS=true`): no upstream links, no version beacons, no telemetry. `PM_DISABLE_SIGNUP`, `PM_IGNORE_DEFINITION_UPDATES`, `PM_ENABLE_REMOTE_ACCESS` (browser SSH terminal and RDP, default off).
 - Own migration set (`migrations_fork/`, table `schema_migrations_fork`) kept separate from upstream migrations.
 
 ## Deployment

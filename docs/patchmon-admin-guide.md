@@ -4098,6 +4098,8 @@ Rendering in the worker and the **Preview** action share a process-wide render g
 
 ## Chapter 21: Web SSH Terminal {#web-ssh-terminal}
 
+> **Disabled by default (amanIT PatMan).** The browser SSH terminal and RDP are only available when the server runs with `PM_ENABLE_REMOTE_ACCESS=true`. Without it, the Terminal/RDP tabs are hidden and the ticket endpoints answer `403 remote_access_disabled`. Rationale: the agent is a patch channel, not a jump host.
+
 ### Overview
 
 PatchMon ships an in-browser SSH terminal that lets operators connect to any monitored Linux/FreeBSD host without leaving the web UI. The terminal is a full xterm with line editing, colours, scrollback, resize, and keyboard shortcuts, powered by a WebSocket between the browser and the PatchMon server.
@@ -4247,6 +4249,8 @@ Server logs also record each upgrade and ticket consumption under `ssh-terminal 
 ---
 
 ## Chapter 22: RDP via Guacamole {#rdp-via-guacamole}
+
+> **Disabled by default (amanIT PatMan).** The browser SSH terminal and RDP are only available when the server runs with `PM_ENABLE_REMOTE_ACCESS=true`. Without it, the Terminal/RDP tabs are hidden and the ticket endpoints answer `403 remote_access_disabled`. Rationale: the agent is a patch channel, not a jump host.
 
 > **Known issue (2.0.0).** The RDP connection flow has a known bug in PatchMon 2.0.0. Sessions may fail to establish, disconnect early, or return opaque errors in certain environments. A fix is planned for the next release. See Release Notes 2.0.0 for details. If RDP is mission-critical for your rollout, validate the workflow in a staging instance before relying on it in production.
 
@@ -4422,6 +4426,8 @@ Server logs include `rdp-ticket` and `rdp session opened` lines with the session
 ---
 
 ## Chapter 23: AI Terminal Assistant {#ai-terminal-assistant}
+
+> **Requires remote access (amanIT PatMan).** The assistant lives inside the Web SSH Terminal, so it is unavailable while the server runs without `PM_ENABLE_REMOTE_ACCESS=true` (see [Web SSH Terminal](#web-ssh-terminal)).
 
 ### Overview
 
@@ -4639,7 +4645,7 @@ Day-to-day NOC tasks.
 | `can_manage_compliance` | Manage Compliance | Trigger compliance scans, remediate findings, install scanners |
 | `can_manage_alerts` | Manage Alerts | Assign, delete and bulk-action alerts |
 | `can_manage_automation` | Manage Automation | Trigger and manage automation jobs |
-| `can_use_remote_access` | Remote Access | Open SSH and RDP terminals against managed hosts |
+| `can_use_remote_access` | Remote Access | Open SSH and RDP terminals against managed hosts (only effective when the server runs with `PM_ENABLE_REMOTE_ACCESS=true`) |
 
 #### Administration (High risk)
 
@@ -4826,6 +4832,43 @@ If **Settings → OIDC / SSO → Sync roles from IdP** is on, PatchMon stops let
 - Users' roles are re-evaluated on every login based on their current IdP group membership.
 
 If you want to use OIDC for authentication but still manage roles locally in PatchMon, leave **Sync roles from IdP** off. See Setting Up OIDC / Single Sign-On for the full toggle reference.
+
+### Audit log events written by PatMan
+
+Besides the login and user-management events, amanIT PatMan writes an `audit_logs` row for every action that changes a host or opens a remote session. Audit rows are written before the action, so `success=true` means "requested/permitted", not "the action completed" (the `*_enqueued` rows only confirm that tasks were queued); the outcome of the action itself is in the patch run, job history or host state. `ssh_session_closed` and `rdp_session_closed` mark the end of the browser session (WebSocket close), not the end of the remote shell.
+
+| Event | Written when |
+|-------|--------------|
+| `patch_run_triggered` | A user starts a manual patch run (per package, patch all, dry run) |
+| `patch_run_approved` | A user approves a patch run that was waiting for approval |
+| `patch_run_validation_retried` | A user retries the validation of a patch run |
+| `patch_run_solved` | A user marks a failed patch run as solved |
+| `patch_runs_bulk_solved` | A user marks several failed patch runs as solved at once |
+| `patch_run_reopened` | A user reopens a solved patch run |
+| `patch_run_solved_note_updated` | A user edits the note of a solved patch run |
+| `patch_schedule_created` / `patch_schedule_updated` / `patch_schedule_deleted` | A user changes a patch schedule |
+| `patch_scheduled_run` | A patch schedule fires (attributed to the schedule creator) |
+| `patch_scheduled_enqueued` | The patch runs of a fired schedule were enqueued |
+| `host_reboot_requested` | A user requests a reboot of one or more hosts |
+| `host_reboot_enqueued` | The reboot tasks of a manual request were enqueued (effective outcome) |
+| `reboot_schedule_created` / `reboot_schedule_updated` / `reboot_schedule_deleted` | A user changes a reboot schedule |
+| `host_reboot_scheduled_run` | A reboot schedule fires (attributed to the schedule creator) |
+| `host_reboot_scheduled_enqueued` | The reboot tasks of a fired schedule were enqueued |
+| `agent_update_forced` | A user forces an agent update on a host |
+| `integration_toggle_requested` | A user enables or disables an agent integration (docker, compliance) |
+| `integration_config_applied` | A user pushes an integration configuration to an agent |
+| `compliance_remediation_requested` | A user requests remediation of a compliance finding |
+| `compliance_scan_triggered` | A user triggers a compliance scan with remediation enabled (plain scans are not audited) |
+| `ssh_ticket_issued` | A user obtains a one-time ticket for the Web SSH Terminal |
+| `ssh_session_opened` / `ssh_session_closed` | The Web SSH WebSocket session opens / closes |
+| `rdp_ticket_issued` | A user obtains a one-time ticket for an RDP session |
+| `rdp_session_opened` / `rdp_session_closed` | The RDP WebSocket session opens / closes |
+
+The rows live in the `audit_logs` table and are read with SQL, for example:
+
+```bash
+docker exec <db> psql -U patchmon_user -d patchmon_db -c "SELECT created_at,event,user_id,details FROM audit_logs ORDER BY created_at DESC LIMIT 50"
+```
 
 ---
 

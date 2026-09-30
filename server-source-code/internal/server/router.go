@@ -203,7 +203,7 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 	}
 	// fork: PM_ENABLE_REMOTE_ACCESS. When off, nothing SSH/RDP related is
 	// constructed (no ticket stores, no terminal/RDP handlers, no guacd).
-	remoteAccess := cfg != nil && cfg.EnableRemoteAccess
+	remoteAccess := cfg.EnableRemoteAccess // cfg is dereferenced above, never nil here
 	if !remoteAccess && log != nil {
 		log.Info("remote access (browser SSH terminal, RDP) is disabled; set PM_ENABLE_REMOTE_ACCESS=true to enable")
 	}

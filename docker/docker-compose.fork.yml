@@ -85,6 +85,9 @@ services:
         max-file: "3"
 
   guacd:
+    # Only needed for RDP, i.e. when the server runs with
+    # PM_ENABLE_REMOTE_ACCESS=true (default off). Without that flag it may be
+    # removed, together with the `guacd:` entry under the server's depends_on.
     # Pinned by digest: guacd 1.6.0, upstream's `latest` build of 2026-02-25.
     # Upstream publishes the `1.6.0` tag once (2025-06) and only rebuilds
     # `latest` with a patched base system, so the version tag is the OLDER

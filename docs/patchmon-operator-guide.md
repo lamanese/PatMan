@@ -1552,6 +1552,7 @@ General HTTP server and network settings.
 | `TRUSTED_PROXY_RANGES` | *(empty)* | No | Comma-separated CIDRs or bare IPs of the reverse proxies in front of PatchMon. The client IP is resolved by walking `X-Forwarded-For` from the right and taking the first address that is not in this list, so a client cannot forge it. Leave it empty when there is a single reverse proxy (the usual setup). Set it only when proxies are chained, for example a CDN in front of Nginx Proxy Manager. Environment only; it cannot be changed in the UI. Only evaluated when `TRUST_PROXY=true`; `X-Real-IP` and `True-Client-IP` are not evaluated. |
 | `PM_SERVER_MACHINE_ID` | _(none)_ | No | Manual override for the remote-reboot self-exclusion check: the machine identity of the host running the PatchMon server itself, which must never be rebootable through PatchMon. Normally **not** needed - the server auto-detects its identity from `/sys/class/dmi/id/product_uuid` (readable host-wide even inside containers) and from the host's machine-id bind-mounted to `/run/host-machine-id` (add `- /etc/machine-id:/run/host-machine-id:ro` to the server's `volumes:` for hosts without readable DMI, e.g. LXC). Set this only when neither source is available - use the host's DMI product UUID: `PM_SERVER_MACHINE_ID=$(sudo cat /sys/class/dmi/id/product_uuid)`. If the server cannot determine any identity, it refuses **all** reboot requests with HTTP 503 (fail closed). |
 | `PM_IGNORE_DEFINITION_UPDATES` | `false` | No | When `true`, excludes Windows Defender "Security Intelligence Update" / definition updates from every outstanding/security update count the UI shows (dashboard cards, host list, host detail, alerts) - Microsoft republishes this update (KB2267602) several times a day, which otherwise makes a fully-patched Windows host permanently show 1 outstanding update. Matching is by WUA category name (English "Definition Updates", German "Definitionsupdates", French "Mises à jour de définitions", Italian "Aggiornamenti delle definizioni") plus KB2267602 as a fallback. The updates stay visible in package/update lists and remain fully installable; only the counters change. |
+| `PM_ENABLE_REMOTE_ACCESS` | `false` | No | Enables the browser SSH terminal and RDP (ticket endpoints, WebSocket routes, guacd start). Off by default; only the exact value `true` enables it. |
 
 **Production example:**
 
@@ -4946,6 +4947,8 @@ Enables browser-based SSH terminal sessions proxied through the PatchMon agent. 
 
 For these reasons, `ssh-proxy-enabled` **cannot be toggled from the PatchMon UI or pushed from the server**. If the server attempts to initiate an SSH proxy session while this is disabled, the agent rejects the request and returns an error message explaining how to enable it.
 
+> **amanIT PatMan, agent 2.0.21 and later:** the agent also **refuses** this key when a server sends it (integration toggle, startup sync, `apply_config`); only `docker` and `compliance` are server-managed. The proxy only ever connects to `localhost` on the host itself; a host name sent by the server is ignored, so the agent can never be used to reach other machines in the network behind it. The server side is additionally off unless it runs with `PM_ENABLE_REMOTE_ACCESS=true`.
+
 ##### How to Enable SSH Proxy
 
 1. SSH into the host where the PatchMon agent is installed.
@@ -5002,6 +5005,8 @@ Enables browser-based RDP (Remote Desktop Protocol) sessions proxied through the
 - The Windows host must have RDP enabled and `guacd` must be available on the PatchMon server.
 
 For these reasons, `rdp-proxy-enabled` **cannot be toggled from the PatchMon UI or pushed from the server**. If the server attempts to initiate an RDP proxy session while this is disabled, the agent rejects the request and returns an error message explaining how to enable it.
+
+> **amanIT PatMan, agent 2.0.21 and later:** as with the SSH proxy, the agent refuses `rdp-proxy-enabled` when a server sends it, and the RDP proxy only ever connects to `localhost` (port from the session, default 3389); a host name sent by the server is ignored. The server side is additionally off unless it runs with `PM_ENABLE_REMOTE_ACCESS=true`.
 
 ##### Prerequisites
 
@@ -5110,6 +5115,8 @@ The agent updates `config.yml` automatically in several scenarios. These are in-
 | **Agent startup** | `integrations.docker`, `integrations.compliance` | Agent fetches integration status from the server. If it differs from config, the agent updates config.yml. |
 | **WebSocket: `settings_update`** | `update_interval`, `report_offset` | Server pushes a new interval. Agent saves it and recalculates the report offset. |
 | **WebSocket: `integration_toggle`** | `integrations.*` (except SSH/RDP proxy) | Server pushes a toggle for Docker or compliance. Agent saves the change and restarts the relevant service. |
+
+Since agent 2.0.21 (amanIT PatMan) every server-driven path (startup sync, `integration_toggle`, `apply_config`) is limited to `integrations.docker` and `integrations.compliance`. The agent refuses `ssh-proxy-enabled`, `rdp-proxy-enabled` and any other key from the server with a warning in its log and leaves `config.yml` untouched.
 
 #### Agent-Calculated Updates
 
