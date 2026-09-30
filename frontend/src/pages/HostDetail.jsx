@@ -984,6 +984,12 @@ const HostDetail = () => {
 		},
 	});
 
+	// Apply and discard must not race each other: while either request is in
+	// flight, both buttons stay disabled.
+	const pendingConfigBusy =
+		applyPendingConfigMutation.isPending ||
+		discardPendingConfigMutation.isPending;
+
 	// Set compliance mode mutation (three-state: disabled, on-demand, enabled)
 	const setComplianceModeMutation = useMutation({
 		mutationFn: (mode) =>
@@ -1357,7 +1363,7 @@ const HostDetail = () => {
 						<button
 							type="button"
 							onClick={() => setShowApplyConfigModal(true)}
-							disabled={!wsStatus?.connected}
+							disabled={!wsStatus?.connected || pendingConfigBusy}
 							className="btn-outline flex items-center gap-2 text-sm whitespace-nowrap border-warning-300 dark:border-warning-600 text-warning-700 dark:text-warning-300 hover:bg-warning-50 dark:hover:bg-warning-900/20"
 							title={
 								!wsStatus?.connected
@@ -1369,11 +1375,11 @@ const HostDetail = () => {
 							<span className="hidden sm:inline">Apply</span>
 						</button>
 					)}
-					{integrationsData?.pending_config_exists && (
+					{integrationsData?.pending_config_exists && canManageHosts() && (
 						<button
 							type="button"
 							onClick={() => discardPendingConfigMutation.mutate()}
-							disabled={discardPendingConfigMutation.isPending}
+							disabled={pendingConfigBusy}
 							className="btn-outline flex items-center gap-2 text-sm whitespace-nowrap"
 							title="Discard pending configuration changes (nothing is sent to the agent)"
 						>
@@ -3915,16 +3921,20 @@ const HostDetail = () => {
 														configuration changes
 													</p>
 												)}
-												<button
-													type="button"
-													onClick={() => discardPendingConfigMutation.mutate()}
-													disabled={discardPendingConfigMutation.isPending}
-													className="btn-outline mt-3 flex items-center gap-2 text-sm whitespace-nowrap"
-													title="Discard pending configuration changes (nothing is sent to the agent)"
-												>
-													<RotateCcw className="h-4 w-4" />
-													Discard changes
-												</button>
+												{canManageHosts() && (
+													<button
+														type="button"
+														onClick={() =>
+															discardPendingConfigMutation.mutate()
+														}
+														disabled={pendingConfigBusy}
+														className="btn-outline mt-3 flex items-center gap-2 text-sm whitespace-nowrap"
+														title="Discard pending configuration changes (nothing is sent to the agent)"
+													>
+														<RotateCcw className="h-4 w-4" />
+														Discard changes
+													</button>
+												)}
 											</div>
 										)}
 										<div className="grid grid-cols-1 gap-4">
@@ -6321,24 +6331,26 @@ const HostDetail = () => {
 							>
 								Cancel
 							</button>
-							<button
-								type="button"
-								onClick={() => discardPendingConfigMutation.mutate()}
-								disabled={discardPendingConfigMutation.isPending}
-								className="px-4 py-2 text-sm font-medium text-secondary-700 dark:text-secondary-200 bg-white dark:bg-secondary-600 border border-secondary-300 dark:border-secondary-500 rounded-md hover:bg-secondary-50 dark:hover:bg-secondary-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-							>
-								{discardPendingConfigMutation.isPending ? (
-									<>
-										<Loader2 className="h-4 w-4 animate-spin" />
-										Discarding...
-									</>
-								) : (
-									<>
-										<RotateCcw className="h-4 w-4" />
-										Discard changes
-									</>
-								)}
-							</button>
+							{canManageHosts() && (
+								<button
+									type="button"
+									onClick={() => discardPendingConfigMutation.mutate()}
+									disabled={pendingConfigBusy}
+									className="px-4 py-2 text-sm font-medium text-secondary-700 dark:text-secondary-200 bg-white dark:bg-secondary-600 border border-secondary-300 dark:border-secondary-500 rounded-md hover:bg-secondary-50 dark:hover:bg-secondary-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+								>
+									{discardPendingConfigMutation.isPending ? (
+										<>
+											<Loader2 className="h-4 w-4 animate-spin" />
+											Discarding...
+										</>
+									) : (
+										<>
+											<RotateCcw className="h-4 w-4" />
+											Discard changes
+										</>
+									)}
+								</button>
+							)}
 							<button
 								type="button"
 								onClick={() => {
@@ -6346,9 +6358,7 @@ const HostDetail = () => {
 										onSuccess: () => setShowApplyConfigModal(false),
 									});
 								}}
-								disabled={
-									applyPendingConfigMutation.isPending || !wsStatus?.connected
-								}
+								disabled={pendingConfigBusy || !wsStatus?.connected}
 								className="px-4 py-2 text-sm font-medium text-white bg-warning-600 hover:bg-warning-700 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
 							>
 								{applyPendingConfigMutation.isPending ? (

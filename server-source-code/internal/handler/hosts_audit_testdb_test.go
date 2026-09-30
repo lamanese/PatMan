@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -187,5 +188,97 @@ func TestSetComplianceModeFailsClosedWithoutAudit(t *testing.T) {
 	}
 	if got := pendingConfigRows(t, d, hostID); got != 0 {
 		t.Fatalf("pending config rows=%d, want 0", got)
+	}
+}
+
+func hostComplianceAuditRows(t *testing.T, d *database.DB, hostID, change string, extra ...string) int {
+	t.Helper()
+	q := `SELECT count(*) FROM audit_logs WHERE event = 'compliance_config_requested' AND user_id = 'user-3' AND success
+		AND details LIKE $1 AND details LIKE $2`
+	args := []any{`%"host_id":"` + hostID + `"%`, `%"change":"` + change + `"%`}
+	for _, e := range extra {
+		args = append(args, "%"+e+"%")
+		q += " AND details LIKE $" + strconv.Itoa(len(args))
+	}
+	var n int
+	if err := d.RawQueryRow(context.Background(), q, args...).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func hostDefaultProfile(t *testing.T, d *database.DB, hostID string) *string {
+	t.Helper()
+	var p *string
+	if err := d.RawQueryRow(context.Background(), `SELECT compliance_default_profile_id FROM hosts WHERE id = $1`, hostID).Scan(&p); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestSetComplianceScannersWritesAuditBeforePending(t *testing.T) {
+	d := newHandlerTestDB(t)
+	hostID := insertSolvedTestHost(t, d, "web01")
+	h := hostsAuditTestHandler(d)
+	w := httptest.NewRecorder()
+	h.SetComplianceScanners(w, hostComplianceRequest(hostID, "scanners", `{"openscap_enabled":false,"docker_bench_enabled":true}`, "user-3"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if n := hostComplianceAuditRows(t, d, hostID, "scanners", `"openscap_enabled":false`, `"docker_bench_enabled":true`); n != 1 {
+		t.Fatalf("audit rows=%d, want 1", n)
+	}
+	if got := pendingConfigRows(t, d, hostID); got != 1 {
+		t.Fatalf("pending config rows=%d, want 1", got)
+	}
+}
+
+func TestSetComplianceScannersFailsClosedWithoutAudit(t *testing.T) {
+	d := newHandlerTestDB(t)
+	hostID := insertSolvedTestHost(t, d, "web01")
+	h := hostsAuditTestHandler(d)
+	h.db = fakeProvider{nil}
+	w := httptest.NewRecorder()
+	h.SetComplianceScanners(w, hostComplianceRequest(hostID, "scanners", `{"openscap_enabled":true}`, "user-3"))
+	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "Failed to write audit log") {
+		t.Fatalf("status=%d body=%s, want 500 audit failure", w.Code, w.Body.String())
+	}
+	if got := pendingConfigRows(t, d, hostID); got != 0 {
+		t.Fatalf("pending config rows=%d, want 0", got)
+	}
+}
+
+func TestSetComplianceDefaultProfileWritesAuditBeforeUpdate(t *testing.T) {
+	d := newHandlerTestDB(t)
+	hostID := insertSolvedTestHost(t, d, "web01")
+	h := hostsAuditTestHandler(d)
+	w := httptest.NewRecorder()
+	h.SetComplianceDefaultProfile(w, hostComplianceRequest(hostID, "default-profile", `{"profile_id":"xccdf_cis_level1"}`, "user-3"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if n := hostComplianceAuditRows(t, d, hostID, "default_profile", `"profile_id":"xccdf_cis_level1"`); n != 1 {
+		t.Fatalf("audit rows=%d, want 1", n)
+	}
+	if p := hostDefaultProfile(t, d, hostID); p == nil || *p != "xccdf_cis_level1" {
+		t.Fatalf("stored profile=%v, want xccdf_cis_level1", p)
+	}
+}
+
+func TestSetComplianceDefaultProfileFailsClosedWithoutAudit(t *testing.T) {
+	d := newHandlerTestDB(t)
+	hostID := insertSolvedTestHost(t, d, "web01")
+	if _, err := d.Exec(context.Background(), `UPDATE hosts SET compliance_default_profile_id = 'old_profile' WHERE id = $1`, hostID); err != nil {
+		t.Fatal(err)
+	}
+	h := hostsAuditTestHandler(d)
+	h.db = fakeProvider{nil}
+	w := httptest.NewRecorder()
+	h.SetComplianceDefaultProfile(w, hostComplianceRequest(hostID, "default-profile", `{"profile_id":"new_profile"}`, "user-3"))
+	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "Failed to write audit log") {
+		t.Fatalf("status=%d body=%s, want 500 audit failure", w.Code, w.Body.String())
+	}
+	if p := hostDefaultProfile(t, d, hostID); p == nil || *p != "old_profile" {
+		t.Fatalf("stored profile=%v, want old_profile unchanged", p)
 	}
 }
