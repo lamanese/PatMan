@@ -4134,7 +4134,7 @@ The **Hosts** related permission (`can_manage_hosts`) is required to see the "Op
    - **Password**: type the host password.
    - **Key**: paste the private key (OpenSSH or PEM format) and the passphrase if encrypted.
 6. Adjust the **SSH port** if needed (default `22`).
-7. If you picked **Proxy** mode, set the **Proxy host** (default `localhost`) and **Proxy port** (default `22`). These are the destination the agent will dial, typically `localhost:22` when you want the agent to SSH into its own host.
+7. If you picked **Proxy** mode, set the **Proxy port** (default `22`). The agent always dials `localhost`; only the port is used (agent 2.0.21+). The **Proxy host** field is still shown but has no effect.
 8. Click **Connect**.
 
 Once the green *"SSH connection established"* line appears, the terminal is live and interactive.
@@ -4166,7 +4166,7 @@ Flow:
 1. Browser → ticket + WebSocket as in Direct mode.
 2. Server receives the `connect` message with `connection_mode: "proxy"`.
 3. Server generates a 16-byte session ID, stores a proxy session record, and sends `{ "type": "ssh_proxy", "session_id": …, "host": "localhost", "port": 22, "username": … }` over the agent's existing WebSocket.
-4. The agent dials `<proxy_host>:<proxy_port>` (defaults `localhost:22`) **on its own host** and pipes the stream back to the server over the WebSocket as `ssh_proxy_data` frames.
+4. The agent dials `localhost:<proxy_port>` (default port `22`) **on its own host** (since agent 2.0.21 a server-sent host is ignored) and pipes the stream back to the server over the WebSocket as `ssh_proxy_data` frames.
 5. The server forwards those frames to the browser as terminal `data` events.
 
 **Agent config requirement.** Proxy mode requires `integrations.ssh-proxy-enabled: true` in the agent's `/etc/patchmon/config.yml`. This setting is not pushed from the server. It has to be set manually and the agent service restarted. If the agent rejects the request, the terminal shows *"Agent not connected"* or an agent-supplied error.

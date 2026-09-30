@@ -4994,7 +4994,7 @@ Set `ssh-proxy-enabled` back to `false` in `config.yml` and restart the agent se
 | **Default** | `false` |
 | **Server-pushable** | No (manual edit required) |
 
-Enables browser-based RDP (Remote Desktop Protocol) sessions proxied through the PatchMon agent. When a user opens the RDP tab for a Windows host in the PatchMon UI, the server sends the RDP connection request to the agent via WebSocket, and the agent establishes a local RDP connection (default: `localhost:3389`) on behalf of the user via `guacd` (Apache Guacamole) running on the PatchMon server.
+Enables browser-based RDP (Remote Desktop Protocol) sessions proxied through the PatchMon agent. When a user opens the RDP tab for a Windows host in the PatchMon UI, the server sends the RDP connection request to the agent via WebSocket, and the agent establishes a local RDP connection (`localhost`, port default 3389) on behalf of the user via `guacd` (Apache Guacamole) running on the PatchMon server.
 
 ##### Why RDP Proxy Requires Manual Configuration
 
