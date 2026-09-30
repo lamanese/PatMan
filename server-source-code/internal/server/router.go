@@ -192,6 +192,7 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 	integrationsHandler := handler.NewIntegrationsHandler(hostsStore, store.NewDockerStore(dbProvider), integrationStatusStore, dbProvider, notifyEmit)
 	complianceStore := store.NewComplianceStore(dbProvider)
 	complianceHandler := handler.NewComplianceHandler(complianceStore, hostsStore, registry, queueClient, queueInspector, integrationStatusStore, cfg.SSGContentDir, notifyEmit)
+	complianceHandler.SetDB(dbProvider)
 	autoEnrollmentStore := store.NewAutoEnrollmentStore(dbProvider)
 	autoEnrollmentHandler := handler.NewAutoEnrollmentHandler(autoEnrollmentStore, hostGroupsStore, hostsStore, settingsStore, log, cfg)
 
