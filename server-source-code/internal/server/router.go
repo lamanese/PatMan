@@ -237,7 +237,7 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 	if sshTicketStore != nil {
 		sshTerminalWSHandler = handler.NewSshTerminalWSHandler(
 			sshTicketStore, hostsStore, usersStore, permissionsStore,
-			registry, sshProxySessions, log,
+			registry, sshProxySessions, log, dbProvider,
 		)
 		agentWsHandler = handler.NewAgentWSHandler(
 			hostsStore, registry, sshTerminalWSHandler.HandleAgentMessage,

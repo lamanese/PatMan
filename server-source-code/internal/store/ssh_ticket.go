@@ -19,6 +19,9 @@ const (
 	sshTicketTTL    = 30 * time.Second
 )
 
+// SshTicketTTL is how long an SSH terminal ticket stays valid.
+const SshTicketTTL = sshTicketTTL
+
 // SshTicketStore stores one-time SSH terminal tickets in Redis.
 type SshTicketStore struct {
 	rdb *hostctx.RedisResolver
