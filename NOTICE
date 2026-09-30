@@ -20,7 +20,7 @@ recorded in the Git history of the fork repository:
 Every release of the fork is tagged (v<upstream-base>-am.<n>, for example
 v2.0.2-am.11). The tag matching the running version is shown in the
 application under Settings -> Server Version, and a link to the source is
-available on the login page.
+available to signed-in users in the navigation sidebar.
 
 Trademarks
 ----------
