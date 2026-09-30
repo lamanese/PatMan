@@ -966,6 +966,13 @@ func (h *HostsHandler) ForceAgentUpdate(w http.ResponseWriter, r *http.Request) 
 		Error(w, http.StatusNotFound, "Host not found")
 		return
 	}
+	if err := h.writeAuditLog(r, "agent_update_forced", true, map[string]interface{}{
+		"host_id": host.ID, "host_name": host.FriendlyName, "api_id": host.ApiID,
+	}); err != nil {
+		slog.Error("refusing forced agent update: audit log write failed", "error", err)
+		Error(w, http.StatusInternalServerError, "Failed to write audit log")
+		return
+	}
 	task, err := queue.NewUpdateAgentTask(host.ApiID, hostFromRequest(r), true) // bypass_settings=true for force update
 	if err != nil {
 		Error(w, http.StatusInternalServerError, "Failed to create agent update task")
@@ -1449,6 +1456,13 @@ func (h *HostsHandler) ToggleIntegration(w http.ResponseWriter, r *http.Request)
 			fields.ComplianceOnDemandOnly = &host.ComplianceOnDemandOnly
 		}
 	}
+	if err := h.writeAuditLog(r, "integration_toggle_requested", true, map[string]interface{}{
+		"host_id": host.ID, "host_name": host.FriendlyName, "integration": integrationName, "enabled": req.Enabled,
+	}); err != nil {
+		slog.Error("refusing integration toggle: audit log write failed", "error", err)
+		Error(w, http.StatusInternalServerError, "Failed to write audit log")
+		return
+	}
 	if err := h.pendingConfig.SetPendingConfig(r.Context(), hostID, fields); err != nil {
 		Error(w, http.StatusInternalServerError, "Failed to store pending integration toggle")
 		return
@@ -1544,6 +1558,15 @@ func (h *HostsHandler) ApplyPendingConfig(w http.ResponseWriter, r *http.Request
 				"docker_bench_enabled": dockerBenchEnabled,
 			},
 		},
+	}
+	if err := h.writeAuditLog(r, "integration_config_applied", true, map[string]interface{}{
+		"host_id": host.ID, "host_name": host.FriendlyName,
+		"docker": dockerEnabled, "compliance": complianceVal,
+		"openscap_enabled": openscapEnabled, "docker_bench_enabled": dockerBenchEnabled,
+	}); err != nil {
+		slog.Error("refusing apply-pending-config: audit log write failed", "host_id", hostID, "error", err)
+		Error(w, http.StatusInternalServerError, "Failed to write audit log")
+		return
 	}
 	if err := h.registry.SendJSON(host.ApiID, msg); err != nil {
 		slog.Error("apply-pending-config: failed to send to agent", "host_id", hostID, "api_id", host.ApiID, "error", err)
