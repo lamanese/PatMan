@@ -647,6 +647,8 @@ func (h *SettingsHandler) GetPublic(w http.ResponseWriter, r *http.Request) {
 			"show_newsletter": h.cfg == nil || (!h.cfg.AdminMode && !h.cfg.HideCommunityLinks),
 			// fork: PM_IGNORE_DEFINITION_UPDATES
 			"ignore_definition_updates": h.cfg != nil && h.cfg.IgnoreDefinitionUpdates,
+			// fork: PM_ENABLE_REMOTE_ACCESS
+			"remote_access_enabled": h.cfg != nil && h.cfg.EnableRemoteAccess,
 		})
 		return
 	}
@@ -668,6 +670,8 @@ func (h *SettingsHandler) GetPublic(w http.ResponseWriter, r *http.Request) {
 		"show_newsletter": h.cfg == nil || (!h.cfg.AdminMode && !h.cfg.HideCommunityLinks),
 		// fork: PM_IGNORE_DEFINITION_UPDATES
 		"ignore_definition_updates": h.cfg != nil && h.cfg.IgnoreDefinitionUpdates,
+		// fork: PM_ENABLE_REMOTE_ACCESS
+		"remote_access_enabled": h.cfg != nil && h.cfg.EnableRemoteAccess,
 	})
 }
 

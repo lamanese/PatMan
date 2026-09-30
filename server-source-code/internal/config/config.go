@@ -177,6 +177,12 @@ type Config struct {
 	// PM_IGNORE_DEFINITION_UPDATES=true in .env.
 	IgnoreDefinitionUpdates bool
 
+	// EnableRemoteAccess turns on the browser SSH terminal and RDP (tickets,
+	// WebSocket routes, guacd start, agent proxy callbacks). Off by default:
+	// the agent is a patch channel, not a jump host. Set
+	// PM_ENABLE_REMOTE_ACCESS=true in .env to enable it on purpose.
+	EnableRemoteAccess bool
+
 	// LicenseMaxHosts overrides the license_max_hosts DB setting (fork
 	// feature: amanit sells packages by VM count). When > 0, the whole
 	// licence settings tab becomes read-only for the customer superadmin
@@ -290,6 +296,7 @@ func Load() (*Config, error) {
 		HideCommunityLinks:      getEnv("PM_HIDE_COMMUNITY_LINKS", "") == "true",
 		DisableSignup:           getEnv("PM_DISABLE_SIGNUP", "") == "true",
 		IgnoreDefinitionUpdates: getEnv("PM_IGNORE_DEFINITION_UPDATES", "") == "true",
+		EnableRemoteAccess:      getEnv("PM_ENABLE_REMOTE_ACCESS", "") == "true",
 		LicenseMaxHosts:         getEnvInt("PM_LICENSE_MAX_HOSTS", 0),
 		LicenseEnforce:          getEnv("PM_LICENSE_ENFORCE", "") == "true",
 		LicensePackage:          getEnv("PM_LICENSE_PACKAGE", ""),

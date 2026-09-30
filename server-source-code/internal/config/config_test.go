@@ -125,3 +125,43 @@ func TestValidate_InvalidPort(t *testing.T) {
 		t.Error("Validate() expected error for port 0")
 	}
 }
+
+// TestLoad_EnableRemoteAccessDefaultOff: the browser SSH terminal and RDP are
+// off unless PM_ENABLE_REMOTE_ACCESS is set on purpose (fail closed).
+func TestLoad_EnableRemoteAccessDefaultOff(t *testing.T) {
+	t.Setenv("ENV_FILE", "/nonexistent")
+	t.Setenv("DATABASE_URL", "postgresql://localhost/test")
+	t.Setenv("JWT_SECRET", "test-secret")
+	t.Setenv("PM_ENABLE_REMOTE_ACCESS", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.EnableRemoteAccess {
+		t.Fatal("remote access must be off by default")
+	}
+}
+
+func TestLoad_EnableRemoteAccessOnlyExactTrue(t *testing.T) {
+	t.Setenv("ENV_FILE", "/nonexistent")
+	t.Setenv("DATABASE_URL", "postgresql://localhost/test")
+	t.Setenv("JWT_SECRET", "test-secret")
+	for _, v := range []string{"1", "TRUE", "yes", "True"} {
+		t.Setenv("PM_ENABLE_REMOTE_ACCESS", v)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load(%q): %v", v, err)
+		}
+		if cfg.EnableRemoteAccess {
+			t.Fatalf("value %q must not enable remote access", v)
+		}
+	}
+	t.Setenv("PM_ENABLE_REMOTE_ACCESS", "true")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.EnableRemoteAccess {
+		t.Fatal("PM_ENABLE_REMOTE_ACCESS=true must enable remote access")
+	}
+}

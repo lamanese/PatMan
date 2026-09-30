@@ -200,7 +200,13 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 	if rdb != nil && enc != nil {
 		bootstrapStore = store.NewBootstrapStore(redisResolver, enc)
 	}
-	if rdb != nil {
+	// fork: PM_ENABLE_REMOTE_ACCESS. When off, nothing SSH/RDP related is
+	// constructed (no ticket stores, no terminal/RDP handlers, no guacd).
+	remoteAccess := cfg != nil && cfg.EnableRemoteAccess
+	if !remoteAccess && log != nil {
+		log.Info("remote access (browser SSH terminal, RDP) is disabled; set PM_ENABLE_REMOTE_ACCESS=true to enable")
+	}
+	if remoteAccess && rdb != nil {
 		sshTicketStore = store.NewSshTicketStore(redisResolver)
 	}
 	reportStore := store.NewReportStore(dbProvider)
@@ -210,7 +216,7 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 	alertConfigStore := store.NewAlertConfigStore(dbProvider)
 	var sshTerminalWSHandler *handler.SshTerminalWSHandler
 	var rdpHandler *handler.RDPHandler
-	if rdb != nil && cfg.GuacdAddress != "" {
+	if remoteAccess && rdb != nil && cfg.GuacdAddress != "" {
 		rdpTicketStore := store.NewRDPTicketStore(redisResolver, enc)
 		rdpSessions := rdpproxy.NewSessions(log, registry)
 		rdpHandler = handler.NewRDPHandler(
@@ -283,10 +289,12 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 	// When GUACD_ADDRESS points to a remote host (e.g. guacd:4822 in Docker), guacd runs as a sidecar.
 	var guacdProc *guacd.Process
 	rdpEnabled := rdpHandler != nil
-	if rdpEnabled && !guacd.IsRemoteAddress(cfg.GuacdAddress) {
-		guacdProc = guacd.Start(ctx, cfg.GuacdPath, cfg.GuacdAddress, log)
-	} else if rdpEnabled && guacd.IsRemoteAddress(cfg.GuacdAddress) && log != nil {
-		log.Info("RDP using remote guacd", "addr", cfg.GuacdAddress)
+	if remoteAccess {
+		if rdpEnabled && !guacd.IsRemoteAddress(cfg.GuacdAddress) {
+			guacdProc = guacd.Start(ctx, cfg.GuacdPath, cfg.GuacdAddress, log)
+		} else if rdpEnabled && guacd.IsRemoteAddress(cfg.GuacdAddress) && log != nil {
+			log.Info("RDP using remote guacd", "addr", cfg.GuacdAddress)
+		}
 	}
 
 	r.Route("/api/v1", func(r chi.Router) {
@@ -334,11 +342,15 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 		// Gated by the ssh_terminal module (Max tier) for multi-context deployments.
 		if sshTerminalWSHandler != nil {
 			r.With(hostctx.RequireModule("ssh_terminal")).Get("/ssh-terminal/{hostId}", sshTerminalWSHandler.ServeWS)
+		} else {
+			r.Get("/ssh-terminal/{hostId}", handler.RemoteAccessDisabled())
 		}
 		// RDP WebSocket tunnel (ticket auth via query param).
 		// Gated by the rdp module (Max tier) for multi-context deployments.
 		if rdpEnabled {
 			r.With(hostctx.RequireModule("rdp")).Handle("/rdp/websocket-tunnel", rdpHandler.WebsocketTunnelHandler())
+		} else {
+			r.Handle("/rdp/websocket-tunnel", handler.RemoteAccessDisabled())
 		}
 
 		r.Get("/auth/signup-enabled", authHandler.SignupEnabled)
@@ -466,10 +478,14 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 			if sshTicketHandler != nil {
 				// Gated by ssh_terminal module (Max tier).
 				r.With(middleware.RequirePermission("can_use_remote_access", permissionsStore), hostctx.RequireModule("ssh_terminal")).Post("/auth/ssh-ticket", sshTicketHandler.ServeCreate)
+			} else {
+				r.Post("/auth/ssh-ticket", handler.RemoteAccessDisabled())
 			}
 			if rdpEnabled {
 				// Gated by rdp module (Max tier).
 				r.With(middleware.RequirePermission("can_use_remote_access", permissionsStore), hostctx.RequireModule("rdp")).Post("/auth/rdp-ticket", rdpHandler.ServeCreateTicket)
+			} else {
+				r.Post("/auth/rdp-ticket", handler.RemoteAccessDisabled())
 			}
 			r.Get("/user/preferences", userPrefsHandler.Get)
 			r.Patch("/user/preferences", userPrefsHandler.Update)
