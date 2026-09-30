@@ -664,6 +664,18 @@ func (h *PatchingHandler) ApproveRun(w http.ResponseWriter, r *http.Request) {
 		approvedBy = &userID
 	}
 
+	// Audit before any mutation: no approval without an audit trail.
+	if err := h.auditRunErr(r, "patch_run_approved", map[string]interface{}{
+		"validation_run_id": valRun.ID,
+		"patch_run_id":      newRunID,
+		"host_id":           valRun.HostID,
+		"triggered_by":      valRun.TriggeredByUserID,
+	}); err != nil {
+		h.log.Error("refusing approval: audit log write failed", "error", err)
+		Error(w, http.StatusInternalServerError, "Failed to write audit log")
+		return
+	}
+
 	// 1. Mark the validation run as "approved" (terminal - preserved with its output).
 	if err := h.patchRuns.MarkValidationApproved(r.Context(), validationID, approvedBy); err != nil {
 		h.log.Error("patching: mark validation approved error", "error", err)
@@ -792,6 +804,9 @@ func (h *PatchingHandler) RetryValidation(w http.ResponseWriter, r *http.Request
 		JSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to create validation task"})
 		return
 	}
+
+	// Best effort: the retry is a dry run and changes nothing on the host.
+	h.auditRun(r, "patch_run_validation_retried", map[string]interface{}{"patch_run_id": id, "host_id": run.HostID})
 
 	// A pending offline-retry task for this run would dispatch the same dry
 	// run a second time once the host is back; this task replaces it.
@@ -1027,6 +1042,31 @@ func (h *PatchingHandler) Trigger(w http.ResponseWriter, r *http.Request) {
 	var createOpts *store.CreateRunOpts
 	if body.PendingApproval {
 		createOpts = &store.CreateRunOpts{InitialStatus: "pending_approval"}
+	}
+	packageCount := len(pkgNames)
+	if pkgName != nil {
+		packageCount = 1
+	}
+	triggerDetail := map[string]interface{}{
+		"patch_run_id":     patchRunID,
+		"host_id":          host.ID,
+		"host_name":        host.FriendlyName,
+		"patch_type":       body.PatchType,
+		"package_count":    packageCount,
+		"dry_run":          body.DryRun,
+		"pending_approval": body.PendingApproval,
+		"policy":           policyNamePtr,
+		"scheduled_at":     scheduledAt,
+	}
+	if pkgName != nil {
+		triggerDetail["package_names"] = []string{*pkgName}
+	} else if len(pkgNames) > 0 {
+		triggerDetail["package_names"] = pkgNames // capped at 100 above
+	}
+	if err := h.auditRunErr(r, "patch_run_triggered", triggerDetail); err != nil {
+		h.log.Error("refusing patch trigger: audit log write failed", "error", err)
+		Error(w, http.StatusInternalServerError, "Failed to write audit log")
+		return
 	}
 	_, err = h.patchRuns.CreateRun(r.Context(), patchRunID, body.HostID, jobID, body.PatchType, pkgName, pkgNames, triggeredBy, body.DryRun, scheduledAt, policyID, policyNamePtr, policySnapshot, createOpts)
 	if err != nil {

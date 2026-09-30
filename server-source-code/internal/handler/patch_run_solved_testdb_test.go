@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PatchMon/PatchMon/server-source-code/internal/config"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/database"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/middleware"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/store"
@@ -249,5 +250,90 @@ func TestGetRunExposesSolvedInfo(t *testing.T) {
 func TestSolvedIsTerminalForStop(t *testing.T) {
 	if !isTerminalPatchStatus("solved") {
 		t.Fatal("solved must be terminal for StopRun")
+	}
+}
+
+func TestAuditRunErrWritesRowAndReturnsErrorWithoutDB(t *testing.T) {
+	d := newHandlerTestDB(t)
+	h := solvedTestHandler(d)
+	r := solvedRequest(http.MethodPost, "/x", "", "run-1", "user-9")
+	if err := h.auditRunErr(r, "patch_run_triggered", map[string]interface{}{"patch_run_id": "run-1"}); err != nil {
+		t.Fatalf("auditRunErr: %v", err)
+	}
+	var n int
+	if err := d.RawQueryRow(context.Background(), `SELECT count(*) FROM audit_logs WHERE event='patch_run_triggered' AND user_id='user-9' AND details LIKE '%run-1%'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("rows=%d err=%v", n, err)
+	}
+	h.db = nil
+	if err := h.auditRunErr(r, "patch_run_triggered", nil); err == nil {
+		t.Fatal("expected error without db")
+	}
+}
+
+func triggerTestHandler(d *database.DB) *PatchingHandler {
+	h := solvedTestHandler(d)
+	h.patchPolicies = store.NewPatchPoliciesStore(fakeProvider{d})
+	h.cfg = &config.Config{}
+	return h
+}
+
+func insertTriggerTestUser(t *testing.T, d *database.DB) {
+	t.Helper()
+	if _, err := d.Exec(context.Background(), `INSERT INTO users (id, username, email, password_hash, role, updated_at) VALUES ('user-3', 'ops3', 'ops3@example.com', 'x', 'admin', NOW())`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTriggerWritesAuditBeforeCreatingRun(t *testing.T) {
+	d := newHandlerTestDB(t)
+	h := triggerTestHandler(d)
+	host := insertSolvedTestHost(t, d, "web01")
+	insertTriggerTestUser(t, d)
+	w := httptest.NewRecorder()
+	h.Trigger(w, solvedRequest(http.MethodPost, "/x", `{"host_id":"`+host+`","patch_type":"patch_all","pending_approval":true}`, "", "user-3"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	var n int
+	if err := d.RawQueryRow(context.Background(), `SELECT count(*) FROM audit_logs WHERE event='patch_run_triggered' AND user_id='user-3'
+		AND details LIKE '%"host_id":"`+host+`"%' AND details LIKE '%"pending_approval":true%' AND details LIKE '%"host_name":"web01"%'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("audit rows=%d err=%v", n, err)
+	}
+}
+
+func TestTriggerRefusesWithoutAudit(t *testing.T) {
+	d := newHandlerTestDB(t)
+	h := triggerTestHandler(d)
+	host := insertSolvedTestHost(t, d, "web01")
+	insertTriggerTestUser(t, d)
+	h.db = fakeProvider{nil}
+	w := httptest.NewRecorder()
+	h.Trigger(w, solvedRequest(http.MethodPost, "/x", `{"host_id":"`+host+`","patch_type":"patch_all","pending_approval":true}`, "", "user-3"))
+	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "Failed to write audit log") {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	var n int
+	if err := d.RawQueryRow(context.Background(), `SELECT count(*) FROM patch_runs WHERE host_id = $1`, host).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("no run may exist without audit: rows=%d err=%v", n, err)
+	}
+}
+
+func TestApproveRunRefusesWithoutAudit(t *testing.T) {
+	d := newHandlerTestDB(t)
+	h := triggerTestHandler(d)
+	host := insertSolvedTestHost(t, d, "web01")
+	run := insertSolvedTestRun(t, d, host, "pending_approval", nil, time.Now().Add(-time.Hour))
+	h.db = fakeProvider{nil}
+	w := httptest.NewRecorder()
+	h.ApproveRun(w, solvedRequest(http.MethodPost, "/x", `{}`, run, "user-3"))
+	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "Failed to write audit log") {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	if st, _, _, _, _ := runState(t, d, run); st != "pending_approval" {
+		t.Fatalf("validation run must stay pending_approval, got %s", st)
+	}
+	var n int
+	if err := d.RawQueryRow(context.Background(), `SELECT count(*) FROM patch_runs WHERE host_id = $1`, host).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("no new run may exist without audit: rows=%d err=%v", n, err)
 	}
 }

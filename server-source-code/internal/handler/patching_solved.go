@@ -2,14 +2,13 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
 	"github.com/PatchMon/PatchMon/server-source-code/internal/database"
-	"github.com/PatchMon/PatchMon/server-source-code/internal/db"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/middleware"
 	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
 )
 
 // Fork: mark failed patch runs as solved (and back). The run's output, error
@@ -212,31 +211,20 @@ func (h *PatchingHandler) BulkSolveRuns(w http.ResponseWriter, r *http.Request) 
 	JSON(w, http.StatusOK, map[string]interface{}{"solved": solved, "skipped": len(body.IDs) - len(solved)})
 }
 
-// auditRun writes a best-effort audit_logs entry (the status change itself
-// is not destructive, so a failed audit write is logged, not fatal).
-func (h *PatchingHandler) auditRun(r *http.Request, event string, detail map[string]interface{}) {
+// auditRunErr writes one audit_logs row and returns the insert error.
+// Callers that must not act without an audit trail (run start, approval)
+// check the error; best-effort callers use auditRun.
+func (h *PatchingHandler) auditRunErr(r *http.Request, event string, detail map[string]interface{}) error {
 	if h.db == nil {
-		return
+		return errors.New("audit: no database")
 	}
-	ctx := r.Context()
-	d := h.db.DB(ctx)
-	if d == nil {
-		return
-	}
-	var requestID *string
-	if rid, _ := ctx.Value(middleware.RequestIDKey).(string); rid != "" {
-		requestID = &rid
-	}
-	ip := clientIPFromRequest(r)
-	ua := r.UserAgent()
-	var details *string
-	if b, err := json.Marshal(detail); err == nil {
-		s := string(b)
-		details = &s
-	}
-	if err := d.Queries.InsertAuditLog(ctx, db.InsertAuditLogParams{
-		ID: uuid.New().String(), Event: event, UserID: userIDFromContext(r), IpAddress: &ip, UserAgent: &ua, RequestID: requestID, Details: details, Success: true,
-	}); err != nil {
+	return auditFromRequest(r, h.db.DB(r.Context()), event, detail)
+}
+
+// auditRun writes a best-effort audit_logs entry (a failed write is logged,
+// not fatal).
+func (h *PatchingHandler) auditRun(r *http.Request, event string, detail map[string]interface{}) {
+	if err := h.auditRunErr(r, event, detail); err != nil {
 		h.log.Warn("patching: audit write failed", "event", event, "error", err)
 	}
 }
