@@ -64,3 +64,11 @@ func TestProxyTargetIsAlwaysLocal(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestRDPProxyTargetPortIsAlways3389(t *testing.T) {
+	for _, in := range []int{0, 3389, 5432} {
+		if got := rdpProxyTargetPort(in); got != 3389 {
+			t.Fatalf("rdpProxyTargetPort(%d) = %d, want 3389", in, got)
+		}
+	}
+}

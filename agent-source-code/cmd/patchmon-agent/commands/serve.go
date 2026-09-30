@@ -1225,7 +1225,7 @@ type wsMsg struct {
 	applyConfig               map[string]interface{} // For apply_config: full config to apply
 	// SSH proxy fields
 	sshProxySessionID  string // Unique session ID for SSH proxy
-	sshProxyHost       string // SSH target host
+	sshProxyHost       string // Ignored: the proxy always dials localhost
 	sshProxyPort       int    // SSH target port
 	sshProxyUsername   string // SSH username
 	sshProxyPassword   string // SSH password
@@ -1244,8 +1244,8 @@ type wsMsg struct {
 	rebootOnlyIfRequired bool // For reboot: only reboot if the system reports a pending reboot
 	// RDP proxy fields
 	rdpProxySessionID string // Unique session ID for RDP proxy
-	rdpProxyHost      string // RDP target host (default localhost)
-	rdpProxyPort      int    // RDP target port (default 3389)
+	rdpProxyHost      string // Ignored: the proxy always dials localhost
+	rdpProxyPort      int    // Always 3389 (see rdpProxyTargetPort)
 	rdpProxyData      string // RDP input data (base64)
 }
 
@@ -2117,11 +2117,12 @@ func connectOnce(out chan<- wsMsg, dockerEvents <-chan interface{}, backoff *tim
 			if payload.Host != "" && payload.Host != "localhost" {
 				logger.WithField("host", logutil.Sanitize(payload.Host)).Info("Ignoring server-sent RDP proxy host, proxy target is always localhost")
 			}
-			rdpHost := proxyTargetHost(payload.Host)
-			port := payload.Port
-			if port < 1 || port > 65535 {
-				port = 3389
+			// The RDP proxy only ever dials port 3389; a server-sent port is ignored.
+			if payload.Port != 0 && payload.Port != rdpProxyTargetPort(payload.Port) {
+				logger.WithField("port", logutil.Sanitize(strconv.Itoa(payload.Port))).Info("Ignoring server-sent RDP proxy port, proxy target is always 3389")
 			}
+			rdpHost := proxyTargetHost(payload.Host)
+			port := rdpProxyTargetPort(payload.Port)
 			logger.WithFields(logutil.SanitizeMap(map[string]interface{}{
 				"session_id": payload.SessionID,
 				"host":       rdpHost,
@@ -4030,6 +4031,11 @@ func runDockerImageScan(imageName, containerName string, scanAllImages bool) err
 // host the server sends is ignored on purpose.
 func proxyTargetHost(_ string) string { return "localhost" }
 
+// rdpProxyTargetPort is the only port the RDP proxy ever dials. The port the
+// server sends is ignored on purpose so the proxy cannot reach other local
+// services.
+func rdpProxyTargetPort(_ int) int { return 3389 }
+
 // SSH proxy session management
 type sshProxySession struct {
 	client    *ssh.Client
@@ -4453,10 +4459,7 @@ func sendRDPProxyClosed(conn *websocket.Conn, sessionID string) {
 func handleRDPProxy(m wsMsg, conn *websocket.Conn) {
 	sessionID := m.rdpProxySessionID
 	host := proxyTargetHost(m.rdpProxyHost)
-	port := m.rdpProxyPort
-	if port <= 0 {
-		port = 3389
-	}
+	port := rdpProxyTargetPort(m.rdpProxyPort)
 
 	logger.WithFields(logutil.SanitizeMap(map[string]interface{}{
 		"session_id": sessionID,
