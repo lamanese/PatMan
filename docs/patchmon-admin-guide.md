@@ -2338,7 +2338,7 @@ The agent then:
 
 The toggle on the UI writes the **desired** state to the PatchMon server. The change is only actually sent to the agent when you click **Apply**, which broadcasts the new config over the WebSocket. If the agent is offline, **Apply** is disabled and the banner tells you so. The change waits in pending state until the agent reconnects.
 
-To throw pending changes away instead, click **Discard changes** (in the page header, in the pending banner of the **Integrations** tab or in the Apply dialog). This only deletes the pending state on the server; nothing is sent to the agent, so it also works while the agent is offline. The host keeps its current integration settings, and the discard is recorded in the audit log (`integration_config_discarded`).
+To throw pending changes away instead, click **Discard changes** (in the page header, in the pending banner of the **Integrations** tab or in the Apply dialog). This only deletes the pending state on the server; nothing is sent to the agent, so it also works while the agent is offline. The host keeps its current integration settings, and the discard is recorded in the audit log (`integration_config_discarded`). Apply and Discard are mutually exclusive on the server: the first request wins, the other one gets an error ("Pending configuration was already applied or discarded") and the page refreshes.
 
 You'll see `integrations.docker` change in the agent's `config.yml` shortly after **Apply** is clicked, without needing to restart the service (the update interval and integration toggles are synced at runtime).
 

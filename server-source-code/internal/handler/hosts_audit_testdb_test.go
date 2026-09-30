@@ -6,8 +6,10 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/PatchMon/PatchMon/server-source-code/internal/agentregistry"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/database"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/middleware"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/store"
@@ -280,5 +282,173 @@ func TestSetComplianceDefaultProfileFailsClosedWithoutAudit(t *testing.T) {
 	}
 	if p := hostDefaultProfile(t, d, hostID); p == nil || *p != "old_profile" {
 		t.Fatalf("stored profile=%v, want old_profile unchanged", p)
+	}
+}
+
+func applyRequest(hostID, userID string) *http.Request {
+	r := routedRequest(http.MethodPost, "/api/v1/hosts/"+hostID+"/integrations/apply-pending-config", "",
+		map[string]string{"hostId": hostID})
+	return r.WithContext(context.WithValue(r.Context(), middleware.UserIDKey, userID))
+}
+
+// registryWithAgent reports the host's agent as connected without a live
+// WebSocket: IsConnected is true, SendJSON fails with ErrNotConnected.
+func registryWithAgent(hostID string) *agentregistry.Registry {
+	reg := agentregistry.New()
+	reg.Register("api-"+hostID, false)
+	return reg
+}
+
+func createPendingDocker(t *testing.T, h *HostsHandler, d *database.DB, hostID string, enabled bool) {
+	t.Helper()
+	w := httptest.NewRecorder()
+	h.ToggleIntegration(w, toggleRequest(hostID, "docker", `{"enabled":`+strconv.FormatBool(enabled)+`}`, "user-3"))
+	if w.Code != http.StatusOK || pendingConfigRows(t, d, hostID) != 1 {
+		t.Fatalf("setup: status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func pendingDocker(t *testing.T, d *database.DB, hostID string) *bool {
+	t.Helper()
+	var v *bool
+	if err := d.RawQueryRow(context.Background(), `SELECT docker_enabled FROM host_pending_config WHERE host_id = $1`, hostID).Scan(&v); err != nil {
+		t.Fatalf("pending row: %v", err)
+	}
+	return v
+}
+
+func TestClaimPendingConfigIsAtomic(t *testing.T) {
+	d := newHandlerTestDB(t)
+	hostID := insertSolvedTestHost(t, d, "web01")
+	h := hostsAuditTestHandler(d)
+	createPendingDocker(t, h, d, hostID, true)
+	ctx := context.Background()
+	first, err := h.pendingConfig.ClaimPendingConfig(ctx, hostID)
+	if err != nil || first == nil || first.DockerEnabled == nil || !*first.DockerEnabled {
+		t.Fatalf("first claim=%+v err=%v, want row with docker_enabled=true", first, err)
+	}
+	second, err := h.pendingConfig.ClaimPendingConfig(ctx, hostID)
+	if err != nil || second != nil {
+		t.Fatalf("second claim=%+v err=%v, want nil, nil", second, err)
+	}
+	if got := pendingConfigRows(t, d, hostID); got != 0 {
+		t.Fatalf("pending config rows=%d, want 0", got)
+	}
+}
+
+func TestClaimPendingConfigConcurrentSingleWinner(t *testing.T) {
+	d := newHandlerTestDB(t)
+	hostID := insertSolvedTestHost(t, d, "web01")
+	h := hostsAuditTestHandler(d)
+	createPendingDocker(t, h, d, hostID, true)
+	const n = 8
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	winners, errs := 0, 0
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			pc, err := h.pendingConfig.ClaimPendingConfig(context.Background(), hostID)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errs++
+			} else if pc != nil {
+				winners++
+			}
+		}()
+	}
+	wg.Wait()
+	if winners != 1 || errs != 0 {
+		t.Fatalf("winners=%d errs=%d, want exactly one winner and no errors", winners, errs)
+	}
+}
+
+func TestApplyAfterDiscardReturnsNoPending(t *testing.T) {
+	d := newHandlerTestDB(t)
+	hostID := insertSolvedTestHost(t, d, "web01")
+	h := hostsAuditTestHandler(d)
+	h.registry = registryWithAgent(hostID)
+	createPendingDocker(t, h, d, hostID, true)
+	w := httptest.NewRecorder()
+	h.DiscardPendingConfig(w, discardRequest(hostID, "user-3"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("discard status=%d body=%s", w.Code, w.Body.String())
+	}
+	w = httptest.NewRecorder()
+	h.ApplyPendingConfig(w, applyRequest(hostID, "user-3"))
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "No pending configuration changes") {
+		t.Fatalf("apply status=%d body=%s, want 400 no pending", w.Code, w.Body.String())
+	}
+	if got := auditRows(t, d, "integration_config_applied", hostID); got != 0 {
+		t.Fatalf("applied audit rows=%d, want 0", got)
+	}
+}
+
+// discardDuringAudit simulates a concurrent Discard that wins between Apply's
+// read of the pending row and its claim: the audit write (the only step in
+// between that touches h.db) deletes the row first.
+type discardDuringAudit struct {
+	d      *database.DB
+	hostID string
+}
+
+func (p discardDuringAudit) DB(ctx context.Context) *database.DB {
+	_, _ = p.d.Exec(ctx, `DELETE FROM host_pending_config WHERE host_id = $1`, p.hostID)
+	return p.d
+}
+
+func TestApplyReturns409WhenClaimLoses(t *testing.T) {
+	d := newHandlerTestDB(t)
+	hostID := insertSolvedTestHost(t, d, "web01")
+	h := hostsAuditTestHandler(d)
+	h.registry = registryWithAgent(hostID)
+	createPendingDocker(t, h, d, hostID, true)
+	h.db = discardDuringAudit{d: d, hostID: hostID}
+	w := httptest.NewRecorder()
+	h.ApplyPendingConfig(w, applyRequest(hostID, "user-3"))
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), `"code":"pending_config_gone"`) ||
+		!strings.Contains(w.Body.String(), "Pending configuration was already applied or discarded") {
+		t.Fatalf("status=%d body=%s, want 409 pending_config_gone", w.Code, w.Body.String())
+	}
+	var docker bool
+	if err := d.RawQueryRow(context.Background(), `SELECT docker_enabled FROM hosts WHERE id = $1`, hostID).Scan(&docker); err != nil || docker {
+		t.Fatalf("hosts.docker_enabled=%v err=%v, want false (nothing applied)", docker, err)
+	}
+	if got := pendingConfigRows(t, d, hostID); got != 0 {
+		t.Fatalf("pending config rows=%d, want 0", got)
+	}
+}
+
+func TestApplyRestoresPendingWhenSendFails(t *testing.T) {
+	d := newHandlerTestDB(t)
+	hostID := insertSolvedTestHost(t, d, "web01")
+	h := hostsAuditTestHandler(d)
+	h.registry = registryWithAgent(hostID) // connected, but SendJSON fails
+	createPendingDocker(t, h, d, hostID, true)
+	w := httptest.NewRecorder()
+	h.ApplyPendingConfig(w, applyRequest(hostID, "user-3"))
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "Failed to send config to agent") {
+		t.Fatalf("status=%d body=%s, want 503 send failure", w.Code, w.Body.String())
+	}
+	if v := pendingDocker(t, d, hostID); v == nil || !*v {
+		t.Fatalf("restored docker_enabled=%v, want true", v)
+	}
+}
+
+func TestDiscardRestoresPendingWhenAuditFails(t *testing.T) {
+	d := newHandlerTestDB(t)
+	hostID := insertSolvedTestHost(t, d, "web01")
+	h := hostsAuditTestHandler(d)
+	createPendingDocker(t, h, d, hostID, true)
+	h.db = fakeProvider{nil} // audit write fails, pending store stays real
+	w := httptest.NewRecorder()
+	h.DiscardPendingConfig(w, discardRequest(hostID, "user-3"))
+	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "Failed to write audit log") {
+		t.Fatalf("status=%d body=%s, want 500 audit failure", w.Code, w.Body.String())
+	}
+	if v := pendingDocker(t, d, hostID); v == nil || !*v {
+		t.Fatalf("pending docker_enabled=%v, want true (unchanged)", v)
 	}
 }

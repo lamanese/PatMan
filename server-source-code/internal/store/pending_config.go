@@ -41,6 +41,21 @@ func (s *PendingConfigStore) GetPendingConfig(ctx context.Context, hostID string
 	return &pc, nil
 }
 
+// ClaimPendingConfig atomically removes and returns the pending config, or nil, nil
+// when no row exists (already applied or discarded by someone else). Apply and
+// Discard both go through this claim, so exactly one of them wins a change.
+func (s *PendingConfigStore) ClaimPendingConfig(ctx context.Context, hostID string) (*db.HostPendingConfig, error) {
+	d := s.db.DB(ctx)
+	pc, err := d.Queries.ForkClaimPendingConfig(ctx, hostID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &pc, nil
+}
+
 // SetPendingConfig merges the given fields into the pending config for the host.
 // Only non-nil fields are updated.
 func (s *PendingConfigStore) SetPendingConfig(ctx context.Context, hostID string, fields PendingConfigFields) error {

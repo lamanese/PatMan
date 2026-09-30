@@ -237,6 +237,9 @@ type Querier interface {
 	// query above sets it), so GREATEST(updated_at, scheduled_at) never reaps a
 	// run before its own scheduled_at plus the caller's threshold has elapsed.
 	ForkCancelStaleWaitingPatchRuns(ctx context.Context, arg ForkCancelStaleWaitingPatchRunsParams) (int64, error)
+	// Atomically removes and returns a host's pending integration config.
+	// Exactly one concurrent caller gets the row; the others get no rows.
+	ForkClaimPendingConfig(ctx context.Context, hostID string) (HostPendingConfig, error)
 	// Fork: customer reports (increment D). Slot claim on scheduled_reports,
 	// recipients, run archive and per-delivery status. List queries never read
 	// pdf/html/csv. All timestamps on the fork tables are TIMESTAMPTZ (Go

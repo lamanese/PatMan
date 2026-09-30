@@ -951,6 +951,15 @@ const HostDetail = () => {
 			);
 		},
 		onError: (error) => {
+			// 409: someone else applied or discarded this change first. The
+			// server did not send anything; refresh and close the dialog.
+			if (error.response?.status === 409) {
+				queryClient.invalidateQueries(["host-integrations", hostId]);
+				refetchIntegrations();
+				setShowApplyConfigModal(false);
+				toast.error("Pending configuration was already applied or discarded");
+				return;
+			}
 			refetchIntegrations();
 			const msg =
 				error.response?.data?.error ||

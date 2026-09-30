@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -1548,80 +1549,69 @@ func (h *HostsHandler) ApplyPendingConfig(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Merge pending with host to get full config to apply
-	dockerEnabled := host.DockerEnabled
-	complianceEnabled := host.ComplianceEnabled
-	complianceOnDemandOnly := host.ComplianceOnDemandOnly
-	openscapEnabled := host.ComplianceOpenscapEnabled
-	dockerBenchEnabled := host.ComplianceDockerBenchEnabled
-	if pending.DockerEnabled != nil {
-		dockerEnabled = *pending.DockerEnabled
-	}
-	if pending.ComplianceEnabled != nil {
-		complianceEnabled = *pending.ComplianceEnabled
-	}
-	if pending.ComplianceOnDemandOnly != nil {
-		complianceOnDemandOnly = *pending.ComplianceOnDemandOnly
-	}
-	if pending.ComplianceOpenscapEnabled != nil {
-		openscapEnabled = *pending.ComplianceOpenscapEnabled
-	}
-	if pending.ComplianceDockerBenchEnabled != nil {
-		dockerBenchEnabled = *pending.ComplianceDockerBenchEnabled
-	}
-
-	// Build compliance value for agent: "on-demand", true, or false
-	var complianceVal interface{}
-	if !complianceEnabled {
-		complianceVal = false
-	} else if complianceOnDemandOnly {
-		complianceVal = "on-demand"
-	} else {
-		complianceVal = true
-	}
-
-	msg := map[string]interface{}{
-		"type": "apply_config",
-		"config": map[string]interface{}{
-			"docker": dockerEnabled,
-			"compliance": map[string]interface{}{
-				"enabled":              complianceVal,
-				"openscap_enabled":     openscapEnabled,
-				"docker_bench_enabled": dockerBenchEnabled,
-			},
-		},
-	}
+	// The audit row describes the change as read above; the values sent to
+	// the agent are recomputed from the claimed row below.
+	preview := mergePendingConfig(host, pending)
 	if err := h.writeAuditLog(r, "integration_config_applied", true, map[string]interface{}{
 		"host_id": host.ID, "host_name": host.FriendlyName,
-		"docker": dockerEnabled, "compliance": complianceVal,
-		"openscap_enabled": openscapEnabled, "docker_bench_enabled": dockerBenchEnabled,
+		"docker": preview.docker, "compliance": preview.complianceValue(),
+		"openscap_enabled": preview.openscap, "docker_bench_enabled": preview.dockerBench,
 	}); err != nil {
 		slog.Error("refusing apply-pending-config: audit log write failed", "host_id", hostID, "error", err)
 		Error(w, http.StatusInternalServerError, "Failed to write audit log")
 		return
 	}
+	// Claim the pending row atomically. A concurrent Discard (or a second
+	// Apply) that got there first leaves nothing to claim: answer 409 and
+	// never send the config to the agent.
+	claimed, err := h.pendingConfig.ClaimPendingConfig(r.Context(), hostID)
+	if err != nil {
+		slog.Error("apply-pending-config: claim failed", "host_id", hostID, "error", err)
+		Error(w, http.StatusInternalServerError, "Failed to claim pending config")
+		return
+	}
+	if claimed == nil {
+		slog.Info("apply-pending-config: pending config already applied or discarded", "host_id", hostID)
+		JSON(w, http.StatusConflict, map[string]string{
+			"error": "Pending configuration was already applied or discarded",
+			"code":  "pending_config_gone",
+		})
+		return
+	}
+	cfg := mergePendingConfig(host, claimed)
+	msg := map[string]interface{}{
+		"type": "apply_config",
+		"config": map[string]interface{}{
+			"docker": cfg.docker,
+			"compliance": map[string]interface{}{
+				"enabled":              cfg.complianceValue(),
+				"openscap_enabled":     cfg.openscap,
+				"docker_bench_enabled": cfg.dockerBench,
+			},
+		},
+	}
 	if err := h.registry.SendJSON(host.ApiID, msg); err != nil {
 		slog.Error("apply-pending-config: failed to send to agent", "host_id", hostID, "api_id", host.ApiID, "error", err)
+		// The agent never got the config: put the claimed change back so it
+		// can be applied again or discarded.
+		h.restorePendingConfig(r.Context(), hostID, claimed)
 		Error(w, http.StatusServiceUnavailable, "Failed to send config to agent")
 		return
 	}
 	slog.Info("apply-pending-config: sent apply_config to agent", "host_id", hostID, "api_id", host.ApiID)
 
-	// Apply to hosts table
-	if err := h.hosts.UpdateDockerEnabled(r.Context(), hostID, dockerEnabled); err != nil {
+	// Apply to hosts table. No restore on failure here: the agent already
+	// has the config.
+	if err := h.hosts.UpdateDockerEnabled(r.Context(), hostID, cfg.docker); err != nil {
 		Error(w, http.StatusInternalServerError, "Failed to update host")
 		return
 	}
-	if err := h.hosts.UpdateComplianceMode(r.Context(), hostID, complianceEnabled, complianceOnDemandOnly); err != nil {
+	if err := h.hosts.UpdateComplianceMode(r.Context(), hostID, cfg.complianceEnabled, cfg.complianceOnDemandOnly); err != nil {
 		Error(w, http.StatusInternalServerError, "Failed to update compliance mode")
 		return
 	}
-	if err := h.hosts.UpdateComplianceScanners(r.Context(), hostID, openscapEnabled, dockerBenchEnabled); err != nil {
+	if err := h.hosts.UpdateComplianceScanners(r.Context(), hostID, cfg.openscap, cfg.dockerBench); err != nil {
 		Error(w, http.StatusInternalServerError, "Failed to update scanner settings")
-		return
-	}
-	if err := h.pendingConfig.ClearPendingConfig(r.Context(), hostID); err != nil {
-		Error(w, http.StatusInternalServerError, "Failed to clear pending config")
 		return
 	}
 
@@ -1641,12 +1631,14 @@ func (h *HostsHandler) DiscardPendingConfig(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	pending, err := h.pendingConfig.GetPendingConfig(r.Context(), hostID)
+	// Claim first (discard is server-only): a concurrent Apply that already
+	// claimed the change leaves nothing here, so both can never succeed.
+	claimed, err := h.pendingConfig.ClaimPendingConfig(r.Context(), hostID)
 	if err != nil {
-		Error(w, http.StatusInternalServerError, "Failed to load pending config")
+		Error(w, http.StatusInternalServerError, "Failed to claim pending config")
 		return
 	}
-	if pending == nil {
+	if claimed == nil {
 		JSON(w, http.StatusOK, map[string]interface{}{
 			"success": true,
 			"message": "No pending configuration",
@@ -1655,11 +1647,11 @@ func (h *HostsHandler) DiscardPendingConfig(w http.ResponseWriter, r *http.Reque
 	}
 	detail := map[string]interface{}{"host_id": host.ID, "host_name": host.FriendlyName}
 	for key, val := range map[string]*bool{
-		"docker":                    pending.DockerEnabled,
-		"compliance":                pending.ComplianceEnabled,
-		"compliance_on_demand_only": pending.ComplianceOnDemandOnly,
-		"openscap_enabled":          pending.ComplianceOpenscapEnabled,
-		"docker_bench_enabled":      pending.ComplianceDockerBenchEnabled,
+		"docker":                    claimed.DockerEnabled,
+		"compliance":                claimed.ComplianceEnabled,
+		"compliance_on_demand_only": claimed.ComplianceOnDemandOnly,
+		"openscap_enabled":          claimed.ComplianceOpenscapEnabled,
+		"docker_bench_enabled":      claimed.ComplianceDockerBenchEnabled,
 	} {
 		if val != nil {
 			detail[key] = *val
@@ -1667,17 +1659,76 @@ func (h *HostsHandler) DiscardPendingConfig(w http.ResponseWriter, r *http.Reque
 	}
 	if err := h.writeAuditLog(r, "integration_config_discarded", true, detail); err != nil {
 		slog.Error("refusing discard-pending-config: audit log write failed", "host_id", hostID, "error", err)
+		// Fail closed: without an audit row the pending change stays in place.
+		h.restorePendingConfig(r.Context(), hostID, claimed)
 		Error(w, http.StatusInternalServerError, "Failed to write audit log")
-		return
-	}
-	if err := h.pendingConfig.ClearPendingConfig(r.Context(), hostID); err != nil {
-		Error(w, http.StatusInternalServerError, "Failed to clear pending config")
 		return
 	}
 	JSON(w, http.StatusOK, map[string]interface{}{
 		"success": true,
 		"message": "Pending configuration discarded",
 	})
+}
+
+// mergedIntegrationConfig is the full integration config after merging a
+// pending row over the host's current values.
+type mergedIntegrationConfig struct {
+	docker                 bool
+	complianceEnabled      bool
+	complianceOnDemandOnly bool
+	openscap               bool
+	dockerBench            bool
+}
+
+func mergePendingConfig(host *models.Host, pc *db.HostPendingConfig) mergedIntegrationConfig {
+	c := mergedIntegrationConfig{
+		docker:                 host.DockerEnabled,
+		complianceEnabled:      host.ComplianceEnabled,
+		complianceOnDemandOnly: host.ComplianceOnDemandOnly,
+		openscap:               host.ComplianceOpenscapEnabled,
+		dockerBench:            host.ComplianceDockerBenchEnabled,
+	}
+	if pc.DockerEnabled != nil {
+		c.docker = *pc.DockerEnabled
+	}
+	if pc.ComplianceEnabled != nil {
+		c.complianceEnabled = *pc.ComplianceEnabled
+	}
+	if pc.ComplianceOnDemandOnly != nil {
+		c.complianceOnDemandOnly = *pc.ComplianceOnDemandOnly
+	}
+	if pc.ComplianceOpenscapEnabled != nil {
+		c.openscap = *pc.ComplianceOpenscapEnabled
+	}
+	if pc.ComplianceDockerBenchEnabled != nil {
+		c.dockerBench = *pc.ComplianceDockerBenchEnabled
+	}
+	return c
+}
+
+// complianceValue is the agent's compliance setting: "on-demand", true or false.
+func (c mergedIntegrationConfig) complianceValue() interface{} {
+	if !c.complianceEnabled {
+		return false
+	}
+	if c.complianceOnDemandOnly {
+		return "on-demand"
+	}
+	return true
+}
+
+// restorePendingConfig puts a claimed pending row back (best effort) after a
+// step that must not consume it failed.
+func (h *HostsHandler) restorePendingConfig(ctx context.Context, hostID string, pc *db.HostPendingConfig) {
+	if err := h.pendingConfig.SetPendingConfig(ctx, hostID, store.PendingConfigFields{
+		DockerEnabled:                pc.DockerEnabled,
+		ComplianceEnabled:            pc.ComplianceEnabled,
+		ComplianceOnDemandOnly:       pc.ComplianceOnDemandOnly,
+		ComplianceOpenscapEnabled:    pc.ComplianceOpenscapEnabled,
+		ComplianceDockerBenchEnabled: pc.ComplianceDockerBenchEnabled,
+	}); err != nil {
+		slog.Warn("failed to restore claimed pending config", "host_id", hostID, "error", err)
+	}
 }
 
 func hostToResponse(h *models.Host, groups []models.HostGroup) map[string]interface{} {
